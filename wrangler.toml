@@ -1,0 +1,20 @@
+# 思辨场后端 · Cloudflare Worker
+# 部署说明见 https://maxlen727.github.io/debating-ground/guide/self-host
+# 这个目录必须能单独部署（Deploy to Cloudflare 按钮只复制 worker/），不要引用目录外的文件
+name = "debating-ground-api"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+# 不记录请求内容：讨论记录里可能有学习者的个人想法
+[observability]
+enabled = false
+
+[vars]
+# 允许调用这个后端的网站，逗号分隔。自己部署时改成你的界面地址。
+ALLOWED_ORIGINS = "https://maxlen727.github.io"
+
+# 以下四项必须用加密变量设置，不要写进这个文件（用按钮部署时，部署页会提示填写）：
+#   npx wrangler secret put API_KEY          AI 服务商的 API Key
+#   npx wrangler secret put API_BASE_URL     服务商的 Base URL，例如 https://api.example.com/v1
+#   npx wrangler secret put MODEL            模型 ID
+#   npx wrangler secret put ACCESS_PASSWORD  访问口令，在界面的“设置”里填写

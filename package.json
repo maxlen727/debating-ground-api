@@ -1,0 +1,33 @@
+{
+  "name": "debating-ground-api",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "description": "思辨场后端：替你保管 AI 服务商的 API Key，并把讨论请求转发给服务商。",
+  "scripts": {
+    "dev": "wrangler dev --var ALLOWED_ORIGINS:http://127.0.0.1:5173,http://127.0.0.1:4173",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.149.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "API_KEY": {
+        "description": "AI 服务商的 API Key。**建议专门为思辨场新建一个 Key，并在服务商那里设置消费上限。**"
+      },
+      "API_BASE_URL": {
+        "description": "服务商的 Base URL，必须是 `https://` 开头，通常以 `/v1` 结尾。需要兼容 OpenAI Chat Completions 协议。"
+      },
+      "MODEL": {
+        "description": "服务商支持的准确模型 ID，在服务商文档里可以找到。"
+      },
+      "ACCESS_PASSWORD": {
+        "description": "自己设一个访问口令，越长越好，之后在思辨场的“设置 → 我的后端”里填写。不设置的话，后端会拒绝所有请求。"
+      },
+      "ALLOWED_ORIGINS": {
+        "description": "允许调用这个后端的网站，逗号分隔，结尾不带 `/`。用在线版思辨场就保持 `https://maxlen727.github.io` 不变。"
+      }
+    }
+  }
+}
