@@ -55,7 +55,7 @@ export interface RoomView {
   expiresAt: number;
 }
 
-export type PersonalPurpose = 'hint' | 'explain' | 'reflect' | 'review';
+export type PersonalPurpose = 'hint' | 'explain' | 'reflect' | 'review' | 'term';
 
 export type ClientMessage =
   | { type: 'hello'; invite: string; name: string }
@@ -70,6 +70,7 @@ export type ClientMessage =
   | { type: 'ask'; reqId: string; purpose: 'hint'; task?: string }
   | { type: 'ask'; reqId: string; purpose: 'explain'; entryId: string; kind: ExplainKind }
   | { type: 'ask'; reqId: string; purpose: 'reflect'; answer: string }
+  | { type: 'ask'; reqId: string; purpose: 'term'; entryId: string; term: string }
   | { type: 'ask'; reqId: string; purpose: 'review'; reflections: string[] };
 
 export type ServerMessage =
