@@ -30,6 +30,7 @@ export interface ChatMessage {
   target?: string;
   skipped?: boolean;
   memberId?: string;    // 多人房间里，这条发言来自哪位成员
+  terms?: string[];     // 发言里学习者可能不熟悉的术语（不含概念本身和要点）
 }
 export interface SystemLine { id: string; kind: 'sys'; text: string }
 export interface Reflection { id: string; kind: 'reflect'; text: string; feedback: string; draft: string }
@@ -61,10 +62,13 @@ export interface SessionSnapshot {
 
 export interface PrepareResult { concept: string; topic: string; keyPoints: string[]; roles: { name: string; title: string; persona: string }[]; opening: string }
 
-export type Purpose = 'prepare' | 'discuss' | 'debate' | 'hint' | 'explain' | 'reflect' | 'review';
+export type Purpose = 'prepare' | 'discuss' | 'debate' | 'hint' | 'explain' | 'reflect' | 'review' | 'term';
+
+// 术语小卡片：讨论中遇到的陌生词
+export interface TermCard { term: string; definition: string; relation: string }
 
 export interface TextResult { text: string; model?: string }
-export interface CoverResult { text: string; covered: number[]; model?: string }
+export interface CoverResult { text: string; covered: number[]; terms?: string[]; model?: string }
 export interface DataResult<T> { data: T; model?: string }
 
 export interface PayloadMap {
@@ -75,6 +79,7 @@ export interface PayloadMap {
   explain: { session: SessionSnapshot; quote: string; kind: ExplainKind };
   reflect: { session: SessionSnapshot; answer: string };
   review: { session: SessionSnapshot };
+  term: { session: SessionSnapshot; term: string; quote?: string };
 }
 export interface ResultMap {
   prepare: DataResult<PrepareResult>;
@@ -84,4 +89,5 @@ export interface ResultMap {
   explain: TextResult;
   reflect: CoverResult;
   review: DataResult<Review>;
+  term: DataResult<TermCard>;
 }

@@ -19,7 +19,7 @@ export interface Env {
 // 只用到 Durable Object 命名空间的这两个方法
 export interface RoomNamespace { idFromName(name: string): unknown; get(id: unknown): { fetch(req: Request): Promise<Response> } }
 
-const PURPOSES: Purpose[] = ['prepare', 'discuss', 'debate', 'hint', 'explain', 'reflect', 'review'];
+const PURPOSES: Purpose[] = ['prepare', 'discuss', 'debate', 'hint', 'explain', 'reflect', 'review', 'term'];
 const MAX_BODY = 1_000_000;
 
 // 先各自做 SHA-256 再逐字节比较，耗时与口令内容无关，避免按时间猜口令

@@ -14,7 +14,8 @@ export interface StoredRoom {
 }
 
 export interface SocketLike { send(data: string): void; close(code?: number, reason?: string): void; memberId(): string | null; setMember(id: string): void }
-export type Generate = (purpose: Purpose, payload: unknown) => Promise<{ text?: string; covered?: number[]; data?: unknown; model?: string }>;
+const cleanTerms = (v: unknown) => Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string').slice(0, 3) : undefined;
+export type Generate = (purpose: Purpose, payload: unknown) => Promise<{ text?: string; covered?: number[]; terms?: string[]; data?: unknown; model?: string }>;
 export interface RoomDeps {
   load(): Promise<StoredRoom | undefined>;
   save(room: StoredRoom): Promise<void>;
@@ -353,10 +354,10 @@ export class RoomCore {
           if (!text) throw new ApiError('模型没有返回可用文本，请重试。');
           for (const i of res.covered ?? []) if (i >= 0 && i < room.setup.keyPoints.length && !room.covered.includes(i)) room.covered.push(i);
           if (debate) {
-            room.entries.push({ id: uid(), kind: 'msg', who: t!.role.id, name: this.seatName(t!.role.id), team: t!.role.team, text, stage: t!.stage, action: t!.action, target: t!.target, source: 'api', model: res.model });
+            room.entries.push({ id: uid(), kind: 'msg', who: t!.role.id, name: this.seatName(t!.role.id), team: t!.role.team, text, stage: t!.stage, action: t!.action, target: t!.target, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
             this.advanceDebate(room);
           } else {
-            room.entries.push({ id: uid(), kind: 'msg', who: persona!.id, name: persona!.name, text, source: 'api', model: res.model });
+            room.entries.push({ id: uid(), kind: 'msg', who: persona!.id, name: persona!.name, text, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
             room.speaker = { kind: 'member', id: this.nextMember(room, room.lastMember) };
           }
         } catch (e) {
@@ -409,7 +410,8 @@ export class RoomCore {
         if (!spoke && !reflections.length) throw new ApiError('你在这场讨论里还没有发言，没有可以复盘的内容。');
         purpose = 'review'; payload = { session: snapshotFor(room, me.id, reflections) };
       } else {
-        if (room.status !== 'live') throw new ApiError('讨论进行中才能使用。');
+        // 术语卡片结束后也能查，方便回看讨论
+        if (room.status !== 'live' && !(msg.purpose === 'term' && room.status === 'finished')) throw new ApiError('讨论进行中才能使用。');
         const session = snapshotFor(room, me.id);
         if (msg.purpose === 'hint') {
           const t = room.setup.mode === 'debate' ? room.setup.turns[room.cursor] : undefined;
@@ -418,6 +420,12 @@ export class RoomCore {
           const entry = room.entries.find(e => e.id === msg.entryId && e.kind === 'msg');
           if (!entry || entry.kind !== 'msg' || !(['unclear', 'example', 'fact'] as ExplainKind[]).includes(msg.kind)) throw new ApiError('找不到这句发言。');
           purpose = 'explain'; payload = { session, quote: entry.text.slice(0, 4000), kind: msg.kind };
+        } else if (msg.purpose === 'term') {
+          const entry = room.entries.find(e => e.id === msg.entryId && e.kind === 'msg');
+          const term = typeof msg.term === 'string' ? msg.term.trim() : '';
+          // 只能查房间里 AI 标出来的词，不能借这个接口随便调用模型
+          if (!entry || entry.kind !== 'msg' || !entry.terms?.includes(term)) throw new ApiError('找不到这个词。');
+          purpose = 'term'; payload = { session, term, quote: entry.text.slice(0, 400) };
         } else if (msg.purpose === 'reflect') {
           purpose = 'reflect'; payload = { session, answer: str(msg.answer, 1000, '小结') };
         } else throw new ApiError('不支持的请求。');
