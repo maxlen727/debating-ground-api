@@ -9,6 +9,15 @@ compatibility_date = "2026-10-01"
 [observability]
 enabled = false
 
+# 多人讨论：一场讨论一个房间（SQLite 存储的 Durable Object，免费计划可用）
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
 [vars]
 # 允许调用这个后端的网站，逗号分隔。自己部署时改成你的界面地址。
 ALLOWED_ORIGINS = "https://maxlen727.github.io"
