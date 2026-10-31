@@ -64,7 +64,8 @@ export type ClientMessage =
   | { type: 'say'; text: string }
   | { type: 'pass' }                                    // 当前发言者自己跳过，或房主跳过当前发言
   | { type: 'callOn'; target: Speaker }                 // 房主点名（圆桌）
-  | { type: 'aiTakeover' }                              // 房主让 AI 代答当前真人席位（辩论）
+  | { type: 'aiTakeover' }                              // 房主让 AI 代答当前同学的席位（辩论）
+  | { type: 'seat'; seat: string | null }               // 辩论：选择席位，null 表示旁听
   | { type: 'retry' }                                   // 房主重试失败的 AI 发言
   | { type: 'finish' }                                  // 房主结束讨论
   | { type: 'ask'; reqId: string; purpose: 'hint'; task?: string }

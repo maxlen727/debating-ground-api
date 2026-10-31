@@ -84,7 +84,7 @@ export function validateSetup(v: unknown): RoomSetup {
     return { id: r.team + (index + 1), team: r.team, index, type: r.type, bg: str(r.bg, 500, '认知背景', false), name: `${r.team === 'A' ? '正' : '反'}方 ${index + 1} 辩` };
   });
   if (new Set(setup.seats.map(s => s.id)).size !== setup.seats.length || !setup.seats.some(s => s.team === 'A') || !setup.seats.some(s => s.team === 'B')) throw new ApiError('辩论席位无效。');
-  if (!setup.seats.some(s => s.type === 'human')) throw new ApiError('至少安排一个真人席位。');
+  // 房间里谁坐哪个席位由大家自己选；这里的 type 只决定房主默认坐哪里
   const stages = Array.isArray(v.stages) ? v.stages.slice(0, 6) : [];
   setup.stages = stages.map((s): Stage => {
     if (!isObj(s) || !KINDS.includes(s.kind as StageKind) || !Number.isInteger(s.rounds) || (s.rounds as number) < 1 || (s.rounds as number) > 3) throw new ApiError('比赛流程无效。');
@@ -126,7 +126,8 @@ export function snapshotFor(room: StoredRoom, viewer: string | null, reflections
     mode: setup.mode, concept: setup.concept, topic: setup.topic, keyPoints: setup.keyPoints,
     roles: setup.personas.map(r => ({ id: r.id, name: r.name, title: r.title, persona: r.persona })),
     messages,
-    turns: debate ? setup.turns : undefined, cursor: debate ? room.cursor : undefined,
+    // 有人坐的席位是真人，没人坐的由 AI 担任
+    turns: debate ? setup.turns.map(t => ({ ...t, role: { ...t.role, type: room.members.some(m => m.seat === t.role.id) ? 'human' as const : 'ai' as const } })) : undefined, cursor: debate ? room.cursor : undefined,
     stages: debate ? setup.stages : undefined, finished: room.status === 'finished'
   };
 }
@@ -219,9 +220,8 @@ export class RoomCore {
     const token = randomToken();
     const member: StoredMember = { id: uid(), name: cleanName(name), host: false, tokenHash: await hash(token), personalCalls: 0 };
     if (room.members.some(m => m.name === member.name)) member.name = member.name.slice(0, ROOM_LIMITS.nameLength - 2) + ' ' + (room.members.length + 1);
-    if (room.setup.mode === 'debate') member.seat = this.freeSeat();
     room.members.push(member);
-    room.entries.push({ id: uid(), kind: 'sys', text: `${member.name} 加入了讨论${member.seat ? '，担任' + this.seatName(member.seat) : room.setup.mode === 'debate' ? '，旁听' : ''}。` });
+    room.entries.push({ id: uid(), kind: 'sys', text: `${member.name} 加入了讨论。` });
     await this.save();
     ws.setMember(member.id);
     this.send(ws, { type: 'welcome', memberId: member.id, token, room: this.view() });
@@ -262,7 +262,7 @@ export class RoomCore {
           room.speaker = { kind: 'ai', id: this.nextPersona(room) };
         } else {
           const t = room.setup.turns[room.cursor];
-          if (!t || t.role.type !== 'human' || me.seat !== t.role.id) throw new ApiError('还没轮到你的席位发言。');
+          if (!t || me.seat !== t.role.id) throw new ApiError('还没轮到你的席位发言。');
           room.entries.push({ id: uid(), kind: 'msg', who: t.role.id, memberId: me.id, name: `${this.seatName(t.role.id)}（${me.name}）`, team: t.role.team, human: true, text, stage: t.stage, action: t.action, target: t.target, source: 'human' });
           this.advanceDebate(room);
         }
@@ -298,8 +298,23 @@ export class RoomCore {
       case 'aiTakeover': {
         hostOnly(); live(); idle();
         const t = room.setup.turns[room.cursor];
-        if (room.setup.mode !== 'debate' || !t || t.role.type !== 'human') throw new ApiError('现在不是真人席位。');
+        if (room.setup.mode !== 'debate' || !t || !this.owner(t.role.id)) throw new ApiError('现在不是同学的席位。');
         room.takeover = true;
+        break;
+      }
+      case 'seat': {
+        if (room.setup.mode !== 'debate') throw new ApiError('圆桌讨论没有席位。');
+        if (room.status === 'finished') throw new ApiError('讨论已经结束。');
+        const seat = msg.seat === null ? undefined : room.setup.seats.find(s => s.id === msg.seat)?.id;
+        if (msg.seat !== null && !seat) throw new ApiError('找不到这个席位。');
+        if (seat === me.seat) return;
+        const other = seat ? this.owner(seat) : undefined;
+        if (other) throw new ApiError(`${other.name} 已经坐在这个席位了。`);
+        // 正在替这个席位生成发言时不能换，免得发言和人对不上
+        const current = room.setup.turns[room.cursor]?.role.id;
+        if (this.running && room.status === 'live' && (current === seat || current === me.seat)) throw new ApiError('这个席位正在发言，稍后再换。');
+        me.seat = seat;
+        room.entries.push({ id: uid(), kind: 'sys', text: seat ? `${me.name} 担任${this.seatName(seat)}。` : `${me.name} 离开席位，改为旁听。` });
         break;
       }
       case 'retry': { hostOnly(); live(); idle(); room.error = ''; break; }
@@ -334,7 +349,7 @@ export class RoomCore {
         const debate = room.setup.mode === 'debate';
         const t = debate ? room.setup.turns[room.cursor] : undefined;
         const persona = !debate && room.speaker?.kind === 'ai' ? room.setup.personas.find(p => p.id === room.speaker!.id) : undefined;
-        if (debate ? !(t && (t.role.type === 'ai' || room.takeover)) : !persona) break;
+        if (debate ? !(t && (!this.owner(t.role.id) || room.takeover)) : !persona) break;
         if (room.error) break;
         if (room.aiCalls >= ROOM_LIMITS.aiCalls) {
           room.error = '这个房间的 AI 调用次数已经用完。房主可以结束讨论，大家各自复盘。';
@@ -392,6 +407,7 @@ export class RoomCore {
     const taken = new Set(this.room!.members.map(m => m.seat));
     return this.room!.setup.seats.find(s => s.type === 'human' && !taken.has(s.id))?.id;
   }
+  private owner(seat: string) { return this.room!.members.find(m => m.seat === seat); }
   private seatName(id: string) { return this.room!.setup.seats.find(s => s.id === id)?.name ?? id; }
 
   /* ---------- 个人请求：提示、讲解、小结、复盘 ---------- */
