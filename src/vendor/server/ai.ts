@@ -246,15 +246,40 @@ export function finalize(request: BuiltRequest, result: { text: string; model: s
 }
 
 /* ---------- 调用 Chat Completions ---------- */
+// 这些用途输出的是给人读的文字，可以边生成边显示；准备、复盘、术语卡片要等完整 JSON 校验后才能用
+export const STREAMABLE: Purpose[] = ['discuss', 'debate', 'hint', 'explain', 'reflect'];
+
+// 流式显示时能给用户看的部分：标记行（[[要点:…]]、[[术语:…]]）只给系统读，从第一个 [[ 起都不显示；
+// 末尾可能是标记或密钥开头的几个字先扣住，等确定不是再放出来。结果总是前一次结果的延长。
+export function visibleText(raw: string, apiKey = ''): string {
+  let v = raw;
+  const cut = v.indexOf('[[');
+  if (cut >= 0) v = v.slice(0, cut);
+  else if (v.endsWith('[')) v = v.slice(0, -1);
+  if (apiKey) {
+    v = v.split(apiKey).join('[密钥已隐藏]');
+    for (let k = Math.min(apiKey.length - 1, v.length); k > 0; k--) if (v.endsWith(apiKey.slice(0, k))) { v = v.slice(0, -k); break; }
+  }
+  return v.trimStart().trimEnd();
+}
+
+type FinishChoice = { message?: { content?: unknown }; delta?: { content?: unknown }; finish_reason?: string | null };
+
 // redirect：Node 用 'error'；Cloudflare Workers 不支持 'error'，用 'manual' 并在下面把 3xx 当作失败。
 // 两种方式效果相同：为保护密钥，绝不跟随服务商的重定向。
-export async function complete(config: ApiConfig, messages: ChatMessage[], { fetchImpl = fetch, signal, timeoutMs = 90000, redirect = 'error' }: { fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; redirect?: 'error' | 'manual' } = {}) {
+// onText：传了就请求流式输出，每收到新内容回调一次能显示的完整文本；超时改为“多久没有新内容”。
+// 服务商不支持流式、直接返回 JSON 时，按普通请求处理。
+export async function complete(config: ApiConfig, messages: ChatMessage[], { fetchImpl = fetch, signal, timeoutMs = 90000, redirect = 'error', onText }: { fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; redirect?: 'error' | 'manual'; onText?: (visible: string) => void } = {}) {
   if (signal?.aborted) throw new ApiError('请求已取消。', 499);
   const controller = new AbortController(); let timedOut = false;
   const cancel = () => controller.abort(); signal?.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs); };
+  // 流式时总时长另有上限，防止服务商一直慢慢吐字
+  const cap = onText ? setTimeout(() => { timedOut = true; controller.abort(); }, Math.max(timeoutMs * 3, 180_000)) : undefined;
+  arm();
   try {
-    const res = await fetchImpl(config.endpoint, { method: 'POST', redirect, signal: controller.signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + config.apiKey }, body: JSON.stringify({ model: config.model, messages, stream: false }) });
+    const res = await fetchImpl(config.endpoint, { method: 'POST', redirect, signal: controller.signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + config.apiKey }, body: JSON.stringify({ model: config.model, messages, stream: !!onText }) });
     if (res.status >= 300 && res.status < 400) { await res.body?.cancel(); throw new ApiError('接口返回了重定向。为保护密钥，不跟随重定向，请填写服务商文档里的准确地址。', 502); }
     if (!res.ok) {
       await res.body?.cancel();
@@ -262,24 +287,70 @@ export async function complete(config: ApiConfig, messages: ChatMessage[], { fet
       throw new ApiError(`API 返回 ${res.status}：${labels[res.status] ?? '服务商暂时无法完成请求，请检查接口配置或稍后重试'}。`, 502);
     }
     if (!res.body) throw new ApiError('接口没有返回内容。', 502);
-    const reader = res.body.getReader(); let raw = '', bytes = 0; const decoder = new TextDecoder();
+    const streaming = !!onText && (res.headers.get('Content-Type') ?? '').includes('text/event-stream');
+    const reader = res.body.getReader(); let raw = '', bytes = 0, out = '', finish: string | null | undefined, shown = '', buffer = '';
+    // 超时或取消时主动停止读取，不依赖 fetch 自己结束响应体
+    controller.signal.addEventListener('abort', () => { reader.cancel().catch(() => {}); }, { once: true });
+    const decoder = new TextDecoder();
     while (true) {
       const { done, value } = await reader.read(); if (done) break;
+      if (controller.signal.aborted) break;
       bytes += value.length;
       if (bytes > 2_000_000) { await reader.cancel(); throw new ApiError('API 响应过大。', 502); }
-      raw += decoder.decode(value, { stream: true });
+      const chunk = decoder.decode(value, { stream: true });
+      if (!streaming) { raw += chunk; continue; }
+      arm();
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/); buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let event: { choices?: FinishChoice[]; error?: { message?: unknown } };
+        try { event = JSON.parse(payload); } catch { continue; }
+        if (event.error) throw new ApiError('服务商在生成过程中报错，本次内容未采用，请重试。', 502);
+        const choice = event.choices?.[0];
+        if (typeof choice?.delta?.content === 'string') out += choice.delta.content;
+        if (choice?.finish_reason) finish = choice.finish_reason;
+        if (out.length > 20000) { await reader.cancel(); throw new ApiError('生成内容过长，本次未采用。', 502); }
+        const v = visibleText(out, config.apiKey);
+        if (v !== shown) { shown = v; onText!(v); }
+      }
     }
-    raw += decoder.decode();
-    let data: { choices?: { message?: { content?: unknown }; finish_reason?: string }[] };
-    try { data = JSON.parse(raw); } catch { throw new ApiError('接口没有返回有效 JSON，请确认支持 Chat Completions 协议。', 502); }
-    const choice = data.choices?.[0], out = choice?.message?.content;
-    if (choice?.finish_reason === 'length') throw new ApiError('模型输出被截断，本次内容未采用；请调整服务商输出限制后重试。', 502);
-    if (typeof out !== 'string' || !out.trim()) throw new ApiError('模型没有返回可用文本；请检查模型是否支持文本 Chat Completions。', 502);
+    if (controller.signal.aborted) throw new ApiError('请求已中断。', 499);
+    if (!streaming) {
+      raw += decoder.decode();
+      let data: { choices?: FinishChoice[] };
+      try { data = JSON.parse(raw); } catch { throw new ApiError('接口没有返回有效 JSON，请确认支持 Chat Completions 协议。', 502); }
+      const choice = data.choices?.[0];
+      out = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+      finish = choice?.finish_reason;
+      if (onText) { const v = visibleText(out, config.apiKey); if (v) onText(v); }
+    }
+    if (finish === 'length') throw new ApiError('模型输出被截断，本次内容未采用；请调整服务商输出限制后重试。', 502);
+    if (!out.trim()) throw new ApiError('模型没有返回可用文本；请检查模型是否支持文本 Chat Completions。', 502);
     if (out.length > 20000) throw new ApiError('生成内容过长，本次未采用。', 502);
     return { text: out.trim().split(config.apiKey).join('[密钥已隐藏]'), model: config.model };
   } catch (e) {
     if (controller.signal.aborted) throw new ApiError(timedOut ? 'API 请求超时，请稍后重试。' : '请求已取消。', timedOut ? 504 : 499);
     if (e instanceof ApiError) throw e;
     throw new ApiError('无法连接 API，请检查地址、网络或服务商状态。为保护密钥，不跟随接口重定向。', 502);
-  } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
+  } finally { clearTimeout(timer); clearTimeout(cap); signal?.removeEventListener('abort', cancel); }
+}
+
+/* ---------- 把一次生成以 SSE 发给浏览器 ---------- */
+// 事件：delta（新增的可显示文字）、done（finalize 后的完整结果）、error（失败原因；已显示的半截文字要撤回）。
+export const sseEvent = (event: 'delta' | 'done' | 'error', data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+export async function streamGenerate(config: ApiConfig, request: BuiltRequest, options: { fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; redirect?: 'error' | 'manual' }, emit: (chunk: string) => void): Promise<boolean> {
+  let sent = '';
+  try {
+    const result = await complete(config, request.messages, { ...options, onText: v => {
+      if (v.length > sent.length && v.startsWith(sent)) { emit(sseEvent('delta', { t: v.slice(sent.length) })); sent = v; }
+    } });
+    emit(sseEvent('done', finalize(request, result)));
+    return true;
+  } catch (e) {
+    emit(sseEvent('error', { error: e instanceof ApiError ? e.message : '后端未能完成请求。', status: e instanceof ApiError ? e.status : 500 }));
+    return false;
+  }
 }

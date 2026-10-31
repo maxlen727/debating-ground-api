@@ -80,6 +80,7 @@ export type ServerMessage =
   | { type: 'answer'; reqId: string; ok: true; result: unknown }
   | { type: 'answer'; reqId: string; ok: false; error: string }
   | { type: 'error'; message: string }
+  | { type: 'stream'; id: string; text: string }       // AI 正在生成的发言（目前能显示的完整文字），完成后以同一个 id 出现在讨论记录里
   | { type: 'closed'; reason: string };                // 房间不存在、已过期或邀请无效，不要再重连
 
 export interface CreatedRoom { roomId: string; invite: string; hostToken: string; expiresAt: number }

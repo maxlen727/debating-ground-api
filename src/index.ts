@@ -2,7 +2,7 @@
 // 和本机服务提供同样的 /api 接口，复用 server/ai.ts 的提示词与校验。
 // 密钥由部署者存成 Worker 的加密变量，浏览器里不需要密钥；访问口令防止别人用你的额度。
 // 多人讨论：/api/rooms 创建房间（需要访问口令），/api/rooms/<id>/ws 用邀请码加入（不需要口令）。
-import { ApiError, normalizeConfig, buildRequest, finalize, complete } from './vendor/server/ai.ts';
+import { ApiError, normalizeConfig, buildRequest, finalize, complete, streamGenerate, STREAMABLE } from './vendor/server/ai.ts';
 import type { Purpose } from './vendor/shared/types.ts';
 import { ROOM_ID } from './vendor/shared/room.ts';
 import { randomToken, roomClass, type Generate } from './room.ts';
@@ -39,10 +39,10 @@ function configOf(env: Env) {
 
 // 房间里的 AI 调用和单人模式走同一套提示词与校验
 export function makeGenerate(env: Env, fetchImpl: typeof fetch = (input, init) => fetch(input, init), timeoutMs = 90000): Generate {
-  return async (purpose, payload) => {
+  return async (purpose, payload, onText) => {
     const config = configOf(env);
     const request = buildRequest(purpose, payload);
-    const result = await complete(config, request.messages, { fetchImpl, timeoutMs, redirect: 'manual' });
+    const result = await complete(config, request.messages, { fetchImpl, timeoutMs, redirect: 'manual', onText });
     return finalize(request, result) as Awaited<ReturnType<Generate>>;
   };
 }
@@ -108,6 +108,16 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
         if (purpose !== 'test' && !PURPOSES.includes(purpose)) throw new ApiError('不支持的 AI 操作。');
 
         const request = buildRequest(purpose, data.payload);
+        // 浏览器要求流式、而且这种用途输出的是文字：用 SSE 边生成边发；之后的失败以 error 事件告知
+        if (data.stream === true && purpose !== 'test' && STREAMABLE.includes(purpose)) {
+          const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+          const writer = writable.getWriter(), enc = new TextEncoder();
+          const done = streamGenerate(config, request, { fetchImpl, timeoutMs, redirect: 'manual', signal: req.signal }, chunk => { void writer.write(enc.encode(chunk)).catch(() => {}); })
+            .finally(() => writer.close().catch(() => {}));
+          void done;
+          headers.set('Content-Type', 'text/event-stream; charset=utf-8');
+          return new Response(readable, { status: 200, headers });
+        }
         const result = await complete(config, request.messages, { fetchImpl, timeoutMs, redirect: 'manual' });
         return json(200, finalize(request, result));
       } catch (e) {

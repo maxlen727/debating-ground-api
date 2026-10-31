@@ -15,7 +15,7 @@ export interface StoredRoom {
 
 export interface SocketLike { send(data: string): void; close(code?: number, reason?: string): void; memberId(): string | null; setMember(id: string): void }
 const cleanTerms = (v: unknown) => Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string').slice(0, 3) : undefined;
-export type Generate = (purpose: Purpose, payload: unknown) => Promise<{ text?: string; covered?: number[]; terms?: string[]; data?: unknown; model?: string }>;
+export type Generate = (purpose: Purpose, payload: unknown, onText?: (visible: string) => void) => Promise<{ text?: string; covered?: number[]; terms?: string[]; data?: unknown; model?: string }>;
 export interface RoomDeps {
   load(): Promise<StoredRoom | undefined>;
   save(room: StoredRoom): Promise<void>;
@@ -359,31 +359,57 @@ export class RoomCore {
         const cursor = room.cursor, speaker = JSON.stringify(room.speaker);
         room.aiBusy = busy; room.aiCalls++;
         await this.save(); this.broadcast();
+        // 边生成边广播，大约每 150 毫秒合并一次，省消息数；完成后的正式发言沿用这个 id，界面能接着动画显示
+        const id = uid();
+        const relay = this.relay(id);
         try {
           const res = debate
-            ? await this.deps.generate('debate', { session: snapshotFor(room, null) })
-            : await this.deps.generate('discuss', { session: snapshotFor(room, null), roleId: persona!.id, task: room.lastMember ? undefined : '主持人请你接着前面的发言说。' });
+            ? await this.deps.generate('debate', { session: snapshotFor(room, null) }, relay.push)
+            : await this.deps.generate('discuss', { session: snapshotFor(room, null), roleId: persona!.id, task: room.lastMember ? undefined : '主持人请你接着前面的发言说。' }, relay.push);
+          relay.stop();
           // 等待期间房主可能结束了讨论
           if (room.status !== 'live' || room.cursor !== cursor || JSON.stringify(room.speaker) !== speaker) break;
           const text = typeof res.text === 'string' ? res.text : '';
           if (!text) throw new ApiError('模型没有返回可用文本，请重试。');
           for (const i of res.covered ?? []) if (i >= 0 && i < room.setup.keyPoints.length && !room.covered.includes(i)) room.covered.push(i);
           if (debate) {
-            room.entries.push({ id: uid(), kind: 'msg', who: t!.role.id, name: this.seatName(t!.role.id), team: t!.role.team, text, stage: t!.stage, action: t!.action, target: t!.target, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
+            room.entries.push({ id, kind: 'msg', who: t!.role.id, name: this.seatName(t!.role.id), team: t!.role.team, text, stage: t!.stage, action: t!.action, target: t!.target, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
             this.advanceDebate(room);
           } else {
-            room.entries.push({ id: uid(), kind: 'msg', who: persona!.id, name: persona!.name, text, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
+            room.entries.push({ id, kind: 'msg', who: persona!.id, name: persona!.name, text, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
             room.speaker = { kind: 'member', id: this.nextMember(room, room.lastMember) };
           }
         } catch (e) {
+          relay.stop();
           room.error = e instanceof ApiError ? e.message : 'AI 发言失败。';
         } finally {
+          relay.stop();
           room.aiBusy = null;
           await this.save(); this.broadcast();
         }
       }
       if (room.error) { await this.save(); this.broadcast(); }
     } finally { this.running = false; }
+  }
+
+  private relay(id: string) {
+    let latest = '', sent = '', last = 0, timer: ReturnType<typeof setTimeout> | undefined, stopped = false;
+    const flush = () => {
+      timer = undefined;
+      if (stopped || latest === sent) return;
+      sent = latest; last = this.deps.now();
+      const data = JSON.stringify({ type: 'stream', id, text: latest } satisfies ServerMessage);
+      for (const ws of this.deps.sockets()) if (ws.memberId()) { try { ws.send(data); } catch { /* 连接已断开 */ } }
+    };
+    return {
+      push: (text: string) => {
+        latest = text;
+        if (stopped || timer) return;
+        const wait = 150 - (this.deps.now() - last);
+        if (wait <= 0) flush(); else timer = setTimeout(flush, wait);
+      },
+      stop: () => { stopped = true; clearTimeout(timer); }
+    };
   }
 
   private nextPersona(room: StoredRoom) {
