@@ -29,6 +29,7 @@ export interface ChatMessage {
   action?: string;
   target?: string;
   skipped?: boolean;
+  memberId?: string;    // 多人房间里，这条发言来自哪位成员
 }
 export interface SystemLine { id: string; kind: 'sys'; text: string }
 export interface Reflection { id: string; kind: 'reflect'; text: string; feedback: string; draft: string }
