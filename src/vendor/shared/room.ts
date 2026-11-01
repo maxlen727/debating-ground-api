@@ -2,6 +2,7 @@
 // 多人房间：浏览器与后端（Durable Object）之间的消息格式。
 // 房间状态以后端为准，浏览器只发“意图”（发言、跳过、点名），由后端判断是否轮到这个人。
 import type { ChatMessage, ExplainKind, Persona, Seat, Stage, SystemLine, Turn } from './types.ts';
+import type { ListenEvent } from './speech.ts';
 
 export type RoomMode = 'roundtable' | 'debate';
 export type RoomStatus = 'lobby' | 'live' | 'finished';
@@ -16,6 +17,8 @@ export const ROOM_LIMITS = {
   personalCalls: 30,     // 每位成员自己的提示、讲解、小结、复盘
   voiceCalls: 120,       // 整个房间的朗读次数：走讯飞，和 AI 调用分开计数
   personalVoice: 30,     // 每位成员的朗读次数；同一条发言、同一个音色合成过一次后再听不计数
+  listenCalls: 200,      // 整个房间的语音输入次数（讯飞语音听写），也和 AI 调用分开计数
+  personalListen: 40,    // 每位成员的语音输入次数
   proposals: 6,          // 待房主审核的要点提案
   quickGapMs: 3000,      // 每人两条快捷短语之间至少隔这么久
   reflections: 6,
@@ -66,6 +69,7 @@ export interface RoomView {
   now?: number;              // 后端发出这份状态时的时间，用来换算倒计时，不依赖手机时钟
   turnStartedAt?: number;    // 当前这次发言开始的时间（后端时钟），0 表示不计时（例如轮到 AI）
   voiceAvailable?: boolean;
+  listenAvailable?: boolean; // 房主的后端配了讯飞语音听写
   proposals?: PointProposal[];
 }
 
@@ -87,6 +91,7 @@ export type ClientMessage =
   | { type: 'speak'; entryId: string; voice: string }   // 朗读一条发言，音频只发给请求的人
   | { type: 'propose'; text: string; source: 'human' | 'ai' }  // 提议新的讨论要点
   | { type: 'decidePoint'; id: string; accept: boolean }       // 房主采纳或忽略提案
+  | { type: 'listen'; op: 'start' | 'audio' | 'end' | 'cancel'; audio?: string }  // 语音输入：录音一帧帧送给房间，识别结果只回给自己
   | { type: 'ask'; reqId: string; purpose: 'hint'; task?: string }
   | { type: 'ask'; reqId: string; purpose: 'explain'; entryId: string; kind: ExplainKind }
   | { type: 'ask'; reqId: string; purpose: 'reflect'; answer: string }
@@ -103,6 +108,7 @@ export type ServerMessage =
   | { type: 'stream'; id: string; text: string }       // AI 正在生成的发言（目前能显示的完整文字），完成后以同一个 id 出现在讨论记录里
   | { type: 'audio'; entryId: string; seq: number; last: boolean; audio: string; mime: string }  // 朗读的一段音频，按 seq 顺序播放
   | { type: 'quick'; memberId: string; name: string; text: string }                             // 有人发了快捷短语
+  | { type: 'heard'; event: ListenEvent }                                                       // 语音输入的识别结果，只发给说话的人
   | { type: 'closed'; reason: string };                // 房间不存在、已过期或邀请无效，不要再重连
 
 export interface CreatedRoom { roomId: string; invite: string; hostToken: string; expiresAt: number }

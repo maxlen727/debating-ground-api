@@ -21,3 +21,25 @@ export function splitForSpeech(text: string, max = SPEECH_SEGMENT): string[] {
   flush();
   return out;
 }
+
+/* ---------- 语音输入（讯飞语音听写） ---------- */
+// 浏览器录音 → 16k 单声道 16 位 PCM，每 40ms 一帧（1280 字节）→ 后端转给讯飞 → 边说边回文字
+export const LISTEN = {
+  rate: 16000,
+  frameBytes: 1280,
+  maxMs: 60_000,                 // 讯飞单次最长 60 秒
+  maxBytes: 60 * 16000 * 2,      // 对应的 PCM 字节数，后端按这个截断
+  startTimeoutMs: 10_000         // 连上后这么久不开始就断开
+} as const;
+
+// 浏览器 → 后端（单人走 /api/stt；房间里包在 { type: 'listen' } 里）
+export type ListenRequest =
+  | { type: 'start'; password?: string }   // password：单人连自己部署的后端时，浏览器的 WebSocket 带不了请求头
+  | { type: 'audio'; audio: string }        // base64 的 PCM
+  | { type: 'end' }                         // 说完了，等最后的结果
+  | { type: 'cancel' };
+// 后端 → 浏览器
+export type ListenEvent =
+  | { type: 'ready' }
+  | { type: 'text'; text: string; final: boolean }   // text 总是到目前为止的完整结果
+  | { type: 'error'; message: string };

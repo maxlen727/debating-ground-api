@@ -8,6 +8,7 @@ import { ROOM_ID } from './vendor/shared/room.ts';
 import { randomToken, roomClass, type Generate } from './room.ts';
 import { synthesizeXfyun, ttsConfigured } from './vendor/server/tts.ts';
 import { SPEECH_SEGMENT } from './vendor/shared/speech.ts';
+import { Listening, listenRelay, sttConfigured } from './vendor/server/stt.ts';
 
 export interface Env {
   API_KEY?: string;          // 加密变量：AI 服务商的 API Key
@@ -52,6 +53,10 @@ export function makeGenerate(env: Env, fetchImpl: typeof fetch = (input, init) =
   };
 }
 
+// Workers 运行时自带的 WebSocketPair；只声明用到的部分，保持可在 Node 里类型检查
+interface PairSocket { accept(): void; send(d: string): void; close(code?: number, reason?: string): void; addEventListener(type: 'message' | 'close' | 'error', fn: (e: Event) => void): void }
+declare const WebSocketPair: { new(): { 0: PairSocket; 1: PairSocket } };
+
 const NO_ROOMS = '这个后端还不支持多人讨论。请把后端更新到最新代码并重新部署。';
 
 export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(input, init), timeoutMs = 90000) {
@@ -84,6 +89,21 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
         return env.ROOMS.get(env.ROOMS.idFromName(ws[1])).fetch(new Request('https://room/ws', { headers: req.headers }));
       }
 
+      // 语音输入：浏览器的 WebSocket 带不了 Authorization，访问口令放在第一条消息里核对
+      if (url.pathname === '/api/stt') {
+        if (req.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return json(426, { error: '请用 WebSocket 连接语音输入。' });
+        if (!origin) return json(403, { error: '语音输入只接受浏览器里的思辨场。' });
+        const pair = new WebSocketPair();
+        const client = pair[0], server = pair[1];
+        server.accept();
+        const authorize = async (given: unknown) => !!env.ACCESS_PASSWORD && typeof given === 'string' && !!given && await sameSecret(given, env.ACCESS_PASSWORD);
+        const relay = listenRelay(env, e => { try { server.send(JSON.stringify(e)); } catch { /* 已断开 */ } }, () => { try { server.close(1000, 'done'); } catch { /* 已关闭 */ } }, authorize);
+        server.addEventListener('message', e => { void relay.handle((e as MessageEvent).data); });
+        server.addEventListener('close', () => relay.close());
+        server.addEventListener('error', () => relay.close());
+        return new Response(null, { status: 101, webSocket: client } as ResponseInit);
+      }
+
       try {
         // 没设口令就拒绝服务：宁可用不了，也不能让任何人用部署者的额度
         if (!env.ACCESS_PASSWORD) throw new ApiError('后端还没有设置访问口令（ACCESS_PASSWORD）。', 503);
@@ -92,7 +112,7 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
 
         const config = configOf(env);
 
-        if (req.method === 'GET' && url.pathname === '/api/config') return json(200, { configured: true, verified: false, baseURL: '', model: config.model, rooms: !!env.ROOMS, ttsConfigured: ttsConfigured(env) });
+        if (req.method === 'GET' && url.pathname === '/api/config') return json(200, { configured: true, verified: false, baseURL: '', model: config.model, rooms: !!env.ROOMS, ttsConfigured: ttsConfigured(env), sttConfigured: sttConfigured(env) });
         if (req.method === 'POST' && url.pathname === '/api/tts') {
           const raw = await req.text();
           if (raw.length > 8_000) throw new ApiError('朗读请求内容过大。', 413);
@@ -142,4 +162,5 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
 }
 
 export default createHandler();
-export const Room = roomClass<Env>(env => makeGenerate(env), env => ttsConfigured(env) ? (text, voice) => synthesizeXfyun(text, voice, env) : undefined);
+export const Room = roomClass<Env>(env => makeGenerate(env), env => ttsConfigured(env) ? (text, voice) => synthesizeXfyun(text, voice, env) : undefined,
+  env => sttConfigured(env) ? emit => new Listening(env, emit) : undefined);
