@@ -10,7 +10,8 @@ export type Source = 'human' | 'demo' | 'api';
 
 export interface Persona { id: string; name: string; title: string; persona: string; tone: 'a' | 'b' | 'c' }
 
-export interface SeatConfig { type: 'human' | 'ai'; bg: string }
+// human：我；peer：留给同学（多人讨论时等同学入座，单人讨论时由 AI 担任）；ai：AI 担任（多人讨论时同学也可以坐）
+export interface SeatConfig { type: 'human' | 'peer' | 'ai'; bg: string }
 export interface Seat extends SeatConfig { id: string; team: Team; index: number }
 export interface Stage { name: string; kind: StageKind; rounds: number }
 export interface Turn { role: Seat; action: string; target?: string; stage: number; round: number }
