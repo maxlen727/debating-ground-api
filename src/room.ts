@@ -79,7 +79,7 @@ export function validateSetup(v: unknown): RoomSetup {
   }
   const seats = Array.isArray(v.seats) ? v.seats.slice(0, 8) : [];
   setup.seats = seats.map((r): RoomSeat => {
-    if (!isObj(r) || (r.team !== 'A' && r.team !== 'B') || !Number.isInteger(r.index) || (r.index as number) < 0 || (r.index as number) > 3 || (r.type !== 'human' && r.type !== 'ai')) throw new ApiError('辩论席位无效。');
+    if (!isObj(r) || (r.team !== 'A' && r.team !== 'B') || !Number.isInteger(r.index) || (r.index as number) < 0 || (r.index as number) > 3 || (r.type !== 'human' && r.type !== 'peer' && r.type !== 'ai')) throw new ApiError('辩论席位无效。');
     const index = r.index as number;
     return { id: r.team + (index + 1), team: r.team, index, type: r.type, bg: str(r.bg, 500, '认知背景', false), name: `${r.team === 'A' ? '正' : '反'}方 ${index + 1} 辩` };
   });
@@ -298,7 +298,7 @@ export class RoomCore {
       case 'aiTakeover': {
         hostOnly(); live(); idle();
         const t = room.setup.turns[room.cursor];
-        if (room.setup.mode !== 'debate' || !t || !this.owner(t.role.id)) throw new ApiError('现在不是同学的席位。');
+        if (room.setup.mode !== 'debate' || !t || !this.waitsForPerson(t.role)) throw new ApiError('现在不是同学的席位。');
         room.takeover = true;
         break;
       }
@@ -349,7 +349,7 @@ export class RoomCore {
         const debate = room.setup.mode === 'debate';
         const t = debate ? room.setup.turns[room.cursor] : undefined;
         const persona = !debate && room.speaker?.kind === 'ai' ? room.setup.personas.find(p => p.id === room.speaker!.id) : undefined;
-        if (debate ? !(t && (!this.owner(t.role.id) || room.takeover)) : !persona) break;
+        if (debate ? !(t && (!this.waitsForPerson(t.role) || room.takeover)) : !persona) break;
         if (room.error) break;
         if (room.aiCalls >= ROOM_LIMITS.aiCalls) {
           room.error = '这个房间的 AI 调用次数已经用完。房主可以结束讨论，大家各自复盘。';
@@ -433,6 +433,8 @@ export class RoomCore {
     const taken = new Set(this.room!.members.map(m => m.seat));
     return this.room!.setup.seats.find(s => s.type === 'human' && !taken.has(s.id))?.id;
   }
+  // 有人坐的席位等这个人；留给同学（或标为“我”）但没人坐的席位也等，房主可以跳过或让 AI 代答；只有 AI 席位没人坐时由 AI 自动发言
+  private waitsForPerson(seat: { id: string; type: string }) { return !!this.owner(seat.id) || seat.type !== 'ai'; }
   private owner(seat: string) { return this.room!.members.find(m => m.seat === seat); }
   private seatName(id: string) { return this.room!.setup.seats.find(s => s.id === id)?.name ?? id; }
 
