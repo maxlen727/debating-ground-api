@@ -6,6 +6,8 @@ import { ApiError, normalizeConfig, buildRequest, finalize, complete, streamGene
 import type { Purpose } from './vendor/shared/types.ts';
 import { ROOM_ID } from './vendor/shared/room.ts';
 import { randomToken, roomClass, type Generate } from './room.ts';
+import { synthesizeXfyun, ttsConfigured } from './vendor/server/tts.ts';
+import { SPEECH_SEGMENT } from './vendor/shared/speech.ts';
 
 export interface Env {
   API_KEY?: string;          // 加密变量：AI 服务商的 API Key
@@ -14,12 +16,15 @@ export interface Env {
   ACCESS_PASSWORD?: string;  // 加密变量：访问口令
   ALLOWED_ORIGINS?: string;  // 普通变量：允许调用的网站，逗号分隔
   ROOMS?: RoomNamespace;     // Durable Object：多人讨论房间
+  XFYUN_APP_ID?: string;      // 加密变量（可选）：讯飞语音朗读
+  XFYUN_API_KEY?: string;
+  XFYUN_API_SECRET?: string;
 }
 
 // 只用到 Durable Object 命名空间的这两个方法
 export interface RoomNamespace { idFromName(name: string): unknown; get(id: unknown): { fetch(req: Request): Promise<Response> } }
 
-const PURPOSES: Purpose[] = ['prepare', 'discuss', 'debate', 'hint', 'explain', 'reflect', 'review', 'term'];
+const PURPOSES: Purpose[] = ['prepare', 'discuss', 'debate', 'hint', 'explain', 'reflect', 'review', 'term', 'point'];
 const MAX_BODY = 1_000_000;
 
 // 先各自做 SHA-256 再逐字节比较，耗时与口令内容无关，避免按时间猜口令
@@ -87,7 +92,16 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
 
         const config = configOf(env);
 
-        if (req.method === 'GET' && url.pathname === '/api/config') return json(200, { configured: true, verified: false, baseURL: '', model: config.model, rooms: !!env.ROOMS });
+        if (req.method === 'GET' && url.pathname === '/api/config') return json(200, { configured: true, verified: false, baseURL: '', model: config.model, rooms: !!env.ROOMS, ttsConfigured: ttsConfigured(env) });
+        if (req.method === 'POST' && url.pathname === '/api/tts') {
+          const raw = await req.text();
+          if (raw.length > 8_000) throw new ApiError('朗读请求内容过大。', 413);
+          let data: { text?: unknown; voice?: unknown };
+          try { data = JSON.parse(raw || '{}'); } catch { throw new ApiError('请求格式错误。'); }
+          // 前端按 splitForSpeech 分段请求，每段不长
+          if (typeof data.text !== 'string' || Array.from(data.text).length > SPEECH_SEGMENT) throw new ApiError('朗读文本无效或太长。');
+          return json(200, await synthesizeXfyun(data.text, data.voice, env));
+        }
         if (req.method === 'POST' && url.pathname === '/api/rooms') {
           if (!env.ROOMS) throw new ApiError(NO_ROOMS, 503);
           const raw = await req.text();
@@ -128,4 +142,4 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
 }
 
 export default createHandler();
-export const Room = roomClass<Env>(env => makeGenerate(env));
+export const Room = roomClass<Env>(env => makeGenerate(env), env => ttsConfigured(env) ? (text, voice) => synthesizeXfyun(text, voice, env) : undefined);

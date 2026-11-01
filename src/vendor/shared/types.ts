@@ -63,10 +63,12 @@ export interface SessionSnapshot {
 
 export interface PrepareResult { concept: string; topic: string; keyPoints: string[]; roles: { name: string; title: string; persona: string }[]; opening: string }
 
-export type Purpose = 'prepare' | 'discuss' | 'debate' | 'hint' | 'explain' | 'reflect' | 'review' | 'term';
+export type Purpose = 'prepare' | 'discuss' | 'debate' | 'hint' | 'explain' | 'reflect' | 'review' | 'term' | 'point';
 
 // 术语小卡片：讨论中遇到的陌生词
 export interface TermCard { term: string; definition: string; relation: string }
+// AI 提议的新讨论要点：要经过人确认才进入要点清单
+export interface PointSuggestion { point: string; why: string }
 
 export interface TextResult { text: string; model?: string }
 export interface CoverResult { text: string; covered: number[]; terms?: string[]; model?: string }
@@ -81,6 +83,7 @@ export interface PayloadMap {
   reflect: { session: SessionSnapshot; answer: string };
   review: { session: SessionSnapshot };
   term: { session: SessionSnapshot; term: string; quote?: string };
+  point: { session: SessionSnapshot };
 }
 export interface ResultMap {
   prepare: DataResult<PrepareResult>;
@@ -91,4 +94,5 @@ export interface ResultMap {
   reflect: CoverResult;
   review: DataResult<Review>;
   term: DataResult<TermCard>;
+  point: DataResult<PointSuggestion>;
 }

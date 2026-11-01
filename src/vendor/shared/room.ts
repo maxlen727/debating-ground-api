@@ -14,12 +14,21 @@ export const ROOM_LIMITS = {
   entries: 300,
   aiCalls: 150,          // 整个房间（AI 发言 + 每个人的提示、讲解、小结、复盘）
   personalCalls: 30,     // 每位成员自己的提示、讲解、小结、复盘
+  voiceCalls: 120,       // 整个房间的朗读次数：走讯飞，和 AI 调用分开计数
+  personalVoice: 30,     // 每位成员的朗读次数；同一条发言、同一个音色合成过一次后再听不计数
+  proposals: 6,          // 待房主审核的要点提案
+  quickGapMs: 3000,      // 每人两条快捷短语之间至少隔这么久
   reflections: 6,
   lifetimeMs: 4 * 3600_000,       // 创建后最多存在 4 小时
   afterFinishMs: 3600_000         // 结束后保留 1 小时，让每个人取到自己的复盘
 } as const;
 
 export interface RoomSeat extends Seat { name: string }
+
+// 快捷短语：只是提醒，不进讨论记录，也不发给 AI
+export const QUICK_MESSAGES = ['等一等', '我在想', '请继续', '快点啊'] as const;
+
+export interface PointProposal { id: string; text: string; source: 'human' | 'ai'; proposer: string; by: string }
 
 // 房主创建房间时提交的内容（来自准备页）
 export interface RoomSetup {
@@ -33,9 +42,10 @@ export interface RoomSetup {
   stages: Stage[];
   turns: Turn[];
   model?: string;
+  turnSeconds?: number;  // 每次发言的提示时限，0 表示不计时；到点只提醒，不打断
 }
 
-export interface RoomMember { id: string; name: string; host: boolean; online: boolean; seat?: string }
+export interface RoomMember { id: string; name: string; host: boolean; online: boolean; seat?: string; typing?: boolean }
 
 // 当前该谁说：成员、AI 嘉宾（圆桌）或辩论席位
 export type Speaker = { kind: 'member'; id: string } | { kind: 'ai'; id: string } | null;
@@ -53,9 +63,13 @@ export interface RoomView {
   error: string;         // AI 发言失败的原因，房主可以重试
   aiCalls: number;
   expiresAt: number;
+  now?: number;              // 后端发出这份状态时的时间，用来换算倒计时，不依赖手机时钟
+  turnStartedAt?: number;    // 当前这次发言开始的时间（后端时钟），0 表示不计时（例如轮到 AI）
+  voiceAvailable?: boolean;
+  proposals?: PointProposal[];
 }
 
-export type PersonalPurpose = 'hint' | 'explain' | 'reflect' | 'review' | 'term';
+export type PersonalPurpose = 'hint' | 'explain' | 'reflect' | 'review' | 'term' | 'point';
 
 export type ClientMessage =
   | { type: 'hello'; invite: string; name: string }
@@ -68,10 +82,16 @@ export type ClientMessage =
   | { type: 'seat'; seat: string | null }               // 辩论：选择席位，null 表示旁听
   | { type: 'retry' }                                   // 房主重试失败的 AI 发言
   | { type: 'finish' }                                  // 房主结束讨论
+  | { type: 'typing'; active: boolean }                 // 正在输入：只在内存里，不写存储
+  | { type: 'quickMessage'; text: string }              // 快捷短语，只能是 QUICK_MESSAGES 里的
+  | { type: 'speak'; entryId: string; voice: string }   // 朗读一条发言，音频只发给请求的人
+  | { type: 'propose'; text: string; source: 'human' | 'ai' }  // 提议新的讨论要点
+  | { type: 'decidePoint'; id: string; accept: boolean }       // 房主采纳或忽略提案
   | { type: 'ask'; reqId: string; purpose: 'hint'; task?: string }
   | { type: 'ask'; reqId: string; purpose: 'explain'; entryId: string; kind: ExplainKind }
   | { type: 'ask'; reqId: string; purpose: 'reflect'; answer: string }
   | { type: 'ask'; reqId: string; purpose: 'term'; entryId: string; term: string }
+  | { type: 'ask'; reqId: string; purpose: 'point' }
   | { type: 'ask'; reqId: string; purpose: 'review'; reflections: string[] };
 
 export type ServerMessage =
@@ -81,6 +101,8 @@ export type ServerMessage =
   | { type: 'answer'; reqId: string; ok: false; error: string }
   | { type: 'error'; message: string }
   | { type: 'stream'; id: string; text: string }       // AI 正在生成的发言（目前能显示的完整文字），完成后以同一个 id 出现在讨论记录里
+  | { type: 'audio'; entryId: string; seq: number; last: boolean; audio: string; mime: string }  // 朗读的一段音频，按 seq 顺序播放
+  | { type: 'quick'; memberId: string; name: string; text: string }                             // 有人发了快捷短语
   | { type: 'closed'; reason: string };                // 房间不存在、已过期或邀请无效，不要再重连
 
 export interface CreatedRoom { roomId: string; invite: string; hostToken: string; expiresAt: number }

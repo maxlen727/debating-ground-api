@@ -2,15 +2,17 @@
 // RoomCore 不依赖 Workers 运行时（存储、WebSocket、AI 调用都由外部传入），可以直接在 Node 里测试；
 // 文件末尾的 Room 类把它接到 Durable Object 上。
 import { ApiError } from './vendor/server/ai.ts';
+import { cleanVoice, splitForSpeech } from './vendor/shared/speech.ts';
 import type { ChatMessage, ExplainKind, Persona, Purpose, SessionSnapshot, Stage, StageKind, SystemLine, Turn } from './vendor/shared/types.ts';
-import { ROOM_LIMITS, type ClientMessage, type CreatedRoom, type RoomMember, type RoomSeat, type RoomSetup, type RoomStatus, type RoomView, type ServerMessage, type Speaker } from './vendor/shared/room.ts';
+import { QUICK_MESSAGES, ROOM_LIMITS, type ClientMessage, type PointProposal, type CreatedRoom, type RoomMember, type RoomSeat, type RoomSetup, type RoomStatus, type RoomView, type ServerMessage, type Speaker } from './vendor/shared/room.ts';
 
-interface StoredMember { id: string; name: string; host: boolean; seat?: string; tokenHash: string; personalCalls: number }
+interface StoredMember { id: string; name: string; host: boolean; seat?: string; tokenHash: string; personalCalls: number; voiceCalls?: number }
 export interface StoredRoom {
   id: string; status: RoomStatus; setup: RoomSetup; members: StoredMember[];
-  entries: (ChatMessage | SystemLine)[]; covered: number[]; cursor: number; speaker: Speaker;
+  entries: (ChatMessage | SystemLine)[]; covered: number[]; cursor: number; speaker: Speaker; turnStartedAt: number;
   nextPersona: number; lastMember: string | null; takeover: boolean;
   inviteHash: string; aiCalls: number; aiBusy: string | null; error: string; created: number; expiresAt: number;
+  voiceCalls?: number; proposals?: PointProposal[];   // 这两项是后加的，旧房间里可能没有
 }
 
 export interface SocketLike { send(data: string): void; close(code?: number, reason?: string): void; memberId(): string | null; setMember(id: string): void }
@@ -22,6 +24,7 @@ export interface RoomDeps {
   destroy(): Promise<void>;
   sockets(): SocketLike[];
   setAlarm(at: number): Promise<void>;
+  synthesize?(text: string, voice: string): Promise<{ audio: string; mime: string }>;
   generate: Generate;
   now(): number;
 }
@@ -65,6 +68,7 @@ export function validateSetup(v: unknown): RoomSetup {
   const setup: RoomSetup = {
     mode, concept: str(v.concept, 80, '概念'), topic: str(v.topic, 300, '讨论题'), keyPoints,
     personas: [], opening: '', seats: [], stages: [], turns: [],
+    turnSeconds: [0, 30, 60, 90, 120].includes(v.turnSeconds as number) ? v.turnSeconds as number : 0,
     model: typeof v.model === 'string' ? v.model.slice(0, 200) : undefined
   };
   if (mode === 'roundtable') {
@@ -138,6 +142,12 @@ export class RoomCore {
   private loading: Promise<StoredRoom | undefined> | null = null;
   private running = false;                    // 同一时间只生成一条 AI 发言
   private asking = new Set<string>();         // 每位成员同一时间只有一个个人请求
+  // 以下只在内存里：Durable Object 休眠后清空也没关系
+  private typingUntil = new Map<string, number>();   // 正在输入，按成员
+  private lastQuick = new Map<string, number>();     // 上一次快捷短语的时间
+  private speaking = new Set<string>();              // 每位成员同一时间只合成一条朗读
+  private voiceCache = new Map<string, string[]>();  // 合成过的音频（按发言和音色），同一条再听不用重新合成
+  private voiceBytes = 0;
   private deps: RoomDeps;
   constructor(deps: RoomDeps) { this.deps = deps; }
 
@@ -166,7 +176,7 @@ export class RoomCore {
       entries.push({ id: uid(), kind: 'msg', who: first.id, name: first.name, text: setup.opening, source: 'api', model: setup.model });
     }
     this.room = {
-      id: input.roomId, status: 'lobby', setup, members: [host], entries, covered: [], cursor: 0, speaker: null,
+      id: input.roomId, status: 'lobby', setup, members: [host], entries, covered: [], cursor: 0, speaker: null, turnStartedAt: now,
       nextPersona: setup.personas.length > 1 ? 1 : 0, lastMember: null, takeover: false,
       inviteHash: await hash(invite), aiCalls: 0, aiBusy: null, error: '', created: now, expiresAt: now + ROOM_LIMITS.lifetimeMs
     };
@@ -180,7 +190,11 @@ export class RoomCore {
   async onOpen(ws: SocketLike) {
     if (!(await this.get())) { this.close(ws, '这个房间不存在或已经结束。'); }
   }
-  async onClose() { if (await this.get()) this.broadcast(); }
+  async onClose(ws?: SocketLike) {
+    const id = ws?.memberId();
+    if (id) this.typingUntil.delete(id);
+    if (await this.get()) this.broadcast();
+  }
 
   async alarm() {
     const room = await this.get();
@@ -206,6 +220,10 @@ export class RoomCore {
       const me = room.members.find(m => m.id === ws.memberId());
       if (!me) return this.send(ws, { type: 'error', message: '请先加入房间。' });
       if (msg.type === 'ask') return await this.ask(ws, room, me, msg);
+      if (msg.type === 'speak') return await this.speak(ws, room, me, msg.entryId, msg.voice);
+      // 这两种消息很频繁：不写存储，也不触发 AI
+      if (msg.type === 'typing') return this.typing(me, msg.active);
+      if (msg.type === 'quickMessage') return this.quick(room, me, msg.text);
       await this.act(room, me, msg);
     } catch (e) {
       this.send(ws, { type: 'error', message: e instanceof ApiError ? e.message : '后端未能完成这个操作。' });
@@ -238,15 +256,39 @@ export class RoomCore {
   }
 
   /* ---------- 讨论流程 ---------- */
-  private async act(room: StoredRoom, me: StoredMember, msg: Exclude<ClientMessage, { type: 'hello' | 'resume' | 'ask' }>) {
+  private async act(room: StoredRoom, me: StoredMember, msg: Exclude<ClientMessage, { type: 'hello' | 'resume' | 'ask' | 'speak' | 'typing' | 'quickMessage' }>) {
     const hostOnly = () => { if (!me.host) throw new ApiError('只有房主可以这样做。'); };
     const live = () => { if (room.status !== 'live') throw new ApiError(room.status === 'lobby' ? '讨论还没有开始。' : '讨论已经结束。'); };
     const idle = () => { if (this.running) throw new ApiError('AI 正在发言，请稍等。'); };
     switch (msg.type) {
+      case 'propose': {
+        if (room.status === 'finished') throw new ApiError('讨论已经结束。');
+        const text = str(msg.text, 40, '要点');
+        const list = room.proposals ??= [];
+        if (room.setup.keyPoints.length >= 6) throw new ApiError('讨论要点最多 6 个。');
+        if (list.length >= ROOM_LIMITS.proposals || list.filter(p => p.by === me.id).length >= 2) throw new ApiError('待审核的提案太多了，请房主先处理。');
+        const same = (a: string) => a.trim().toLocaleLowerCase() === text.toLocaleLowerCase();
+        if (room.setup.keyPoints.some(same) || list.some(p => same(p.text))) throw new ApiError('这条要点已经有了。');
+        // 房主自己写的要点直接加入；同学写的和 AI 提议的都要房主确认
+        if (me.host && msg.source !== 'ai') { this.addPoint(room, text); break; }
+        list.push({ id: uid(), text, source: msg.source === 'ai' ? 'ai' : 'human', proposer: me.name, by: me.id });
+        break;
+      }
+      case 'decidePoint': {
+        hostOnly();
+        const list = room.proposals ?? [];
+        const p = list.find(x => x.id === msg.id);
+        if (!p) throw new ApiError('找不到这条提案。');
+        room.proposals = list.filter(x => x !== p);
+        if (msg.accept) this.addPoint(room, p.text);
+        break;
+      }
       case 'start': {
         hostOnly();
         if (room.status !== 'lobby') throw new ApiError('讨论已经开始。');
         room.status = 'live';
+        const firstTurn = room.setup.turns[room.cursor];
+        room.turnStartedAt = room.setup.mode === 'debate' && firstTurn && !this.waitsForPerson(firstTurn.role) ? 0 : this.deps.now();
         room.entries.push({ id: uid(), kind: 'sys', text: '讨论开始。' });
         if (room.setup.mode === 'roundtable') room.speaker = { kind: 'member', id: me.id };
         break;
@@ -255,11 +297,13 @@ export class RoomCore {
         live(); idle();
         const text = str(msg.text, ROOM_LIMITS.textLength, '发言');
         this.roomFull(room);
+        this.typingUntil.delete(me.id);
         if (room.setup.mode === 'roundtable') {
           if (room.speaker?.kind !== 'member' || room.speaker.id !== me.id) throw new ApiError('还没轮到你发言。');
           room.entries.push({ id: uid(), kind: 'msg', who: me.id, memberId: me.id, name: me.name, human: true, text, source: 'human' });
           room.lastMember = me.id;
           room.speaker = { kind: 'ai', id: this.nextPersona(room) };
+          room.turnStartedAt = 0;
         } else {
           const t = room.setup.turns[room.cursor];
           if (!t || me.seat !== t.role.id) throw new ApiError('还没轮到你的席位发言。');
@@ -274,6 +318,7 @@ export class RoomCore {
           const sp = room.speaker;
           if (!(me.host || (sp?.kind === 'member' && sp.id === me.id))) throw new ApiError('只有当前发言的人或房主可以跳过。');
           room.speaker = { kind: 'member', id: this.nextMember(room, sp?.kind === 'member' ? sp.id : room.lastMember) };
+          room.turnStartedAt = this.deps.now();
           room.error = '';
         } else {
           const t = room.setup.turns[room.cursor];
@@ -292,6 +337,7 @@ export class RoomCore {
         if (target?.kind === 'member' && room.members.some(m => m.id === target.id)) room.speaker = { kind: 'member', id: target.id };
         else if (target?.kind === 'ai' && room.setup.personas.some(p => p.id === target.id)) room.speaker = { kind: 'ai', id: target.id };
         else throw new ApiError('找不到这位发言者。');
+        room.turnStartedAt = target?.kind === 'member' ? this.deps.now() : 0;
         room.error = '';
         break;
       }
@@ -323,11 +369,13 @@ export class RoomCore {
     }
     await this.save();
     this.broadcast();
-    if (msg.type !== 'finish') await this.runAI(room);
+    if (!['finish', 'propose', 'decidePoint'].includes(msg.type)) await this.runAI(room);
   }
 
   private advanceDebate(room: StoredRoom) {
     room.cursor++; room.takeover = false;
+    const nextTurn = room.setup.turns[room.cursor];
+    room.turnStartedAt = nextTurn && !this.waitsForPerson(nextTurn.role) ? 0 : this.deps.now();
     if (room.cursor >= room.setup.turns.length) this.finish(room);
   }
   private finish(room: StoredRoom) {
@@ -378,6 +426,7 @@ export class RoomCore {
           } else {
             room.entries.push({ id, kind: 'msg', who: persona!.id, name: persona!.name, text, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
             room.speaker = { kind: 'member', id: this.nextMember(room, room.lastMember) };
+            room.turnStartedAt = this.deps.now();
           }
         } catch (e) {
           relay.stop();
@@ -438,7 +487,75 @@ export class RoomCore {
   private owner(seat: string) { return this.room!.members.find(m => m.seat === seat); }
   private seatName(id: string) { return this.room!.setup.seats.find(s => s.id === id)?.name ?? id; }
 
+  private addPoint(room: StoredRoom, text: string) {
+    if (room.setup.keyPoints.length >= 6) throw new ApiError('讨论要点最多 6 个。');
+    room.setup.keyPoints.push(text);
+    if (room.entries.length < ROOM_LIMITS.entries) room.entries.push({ id: uid(), kind: 'sys', text: `新增讨论要点：${text}` });
+  }
+
+  /* ---------- 正在输入、快捷短语 ---------- */
+  private typing(me: StoredMember, active: unknown) {
+    if (typeof active !== 'boolean') throw new ApiError('输入状态无效。');
+    const now = this.deps.now();
+    const was = (this.typingUntil.get(me.id) ?? 0) > now;
+    // 前端每隔几秒续一次；没续上（断网、关页面）就自动消失
+    if (active) this.typingUntil.set(me.id, now + 6000); else this.typingUntil.delete(me.id);
+    if (was !== active) this.broadcast();
+  }
+  private quick(room: StoredRoom, me: StoredMember, text: unknown) {
+    if (room.status !== 'live') throw new ApiError('讨论进行中才能发送。');
+    if (!(QUICK_MESSAGES as readonly unknown[]).includes(text)) throw new ApiError('只能发送列表里的快捷短语。');
+    const now = this.deps.now();
+    if (now - (this.lastQuick.get(me.id) ?? -Infinity) < ROOM_LIMITS.quickGapMs) throw new ApiError('发得太快了，过几秒再发。');
+    this.lastQuick.set(me.id, now);
+    const m: ServerMessage = { type: 'quick', memberId: me.id, name: me.name, text: text as string };
+    for (const ws of this.deps.sockets()) if (ws.memberId()) this.send(ws, m);
+  }
+
+  /* ---------- 朗读 ---------- */
+  // 走房主配置的讯飞额度，和 AI 调用分开计数；音频只发给点朗读的人
+  private async speak(ws: SocketLike, room: StoredRoom, me: StoredMember, entryId: unknown, voice: unknown) {
+    if (!this.deps.synthesize) throw new ApiError('房主的后端还没有配置讯飞语音。', 503);
+    const entry = room.entries.find(e => e.id === entryId && e.kind === 'msg' && !e.skipped);
+    if (!entry || entry.kind !== 'msg') throw new ApiError('找不到这条发言。');
+    const vcn = cleanVoice(voice), key = entry.id + '|' + vcn;
+    const cached = this.voiceCache.get(key);
+    if (cached) {
+      cached.forEach((audio, seq) => this.send(ws, { type: 'audio', entryId: entry.id, seq, last: seq === cached.length - 1, audio, mime: 'audio/mpeg' }));
+      return;
+    }
+    if (this.speaking.has(me.id)) throw new ApiError('上一条朗读还在合成，请稍等。');
+    if ((me.voiceCalls ?? 0) >= ROOM_LIMITS.personalVoice) throw new ApiError('你在这个房间里的朗读次数已经用完。', 429);
+    if ((room.voiceCalls ?? 0) >= ROOM_LIMITS.voiceCalls) throw new ApiError('这个房间的朗读次数已经用完。', 429);
+    const parts = splitForSpeech(entry.text);
+    if (!parts.length) throw new ApiError('这条发言没有可以朗读的文字。');
+    me.voiceCalls = (me.voiceCalls ?? 0) + 1; room.voiceCalls = (room.voiceCalls ?? 0) + 1;
+    await this.save();
+    this.speaking.add(me.id);
+    try {
+      const audio: string[] = [];
+      // 一段一段合成、一段一段发，第一段到了就能开始播
+      for (const [seq, part] of parts.entries()) {
+        const r = await this.deps.synthesize(part, vcn);
+        audio.push(r.audio);
+        this.send(ws, { type: 'audio', entryId: entry.id, seq, last: seq === parts.length - 1, audio: r.audio, mime: r.mime });
+      }
+      this.remember(key, audio);
+    } finally { this.speaking.delete(me.id); }
+  }
+  private remember(key: string, audio: string[]) {
+    const size = audio.reduce((n, a) => n + a.length, 0);
+    if (size > VOICE_CACHE_BYTES / 4) return;
+    this.voiceCache.set(key, audio); this.voiceBytes += size;
+    // 超出上限时丢掉最早的
+    for (const [k, v] of this.voiceCache) {
+      if (this.voiceBytes <= VOICE_CACHE_BYTES) break;
+      this.voiceCache.delete(k); this.voiceBytes -= v.reduce((n, a) => n + a.length, 0);
+    }
+  }
+
   /* ---------- 个人请求：提示、讲解、小结、复盘 ---------- */
+
   private async ask(ws: SocketLike, room: StoredRoom, me: StoredMember, msg: Extract<ClientMessage, { type: 'ask' }>) {
     const reqId = typeof msg.reqId === 'string' ? msg.reqId.slice(0, 40) : '';
     const reply = (m: ServerMessage) => this.send(ws, m);
@@ -472,6 +589,9 @@ export class RoomCore {
           purpose = 'term'; payload = { session, term, quote: entry.text.slice(0, 400) };
         } else if (msg.purpose === 'reflect') {
           purpose = 'reflect'; payload = { session, answer: str(msg.answer, 1000, '小结') };
+        } else if (msg.purpose === 'point') {
+          if (room.setup.keyPoints.length >= 6) throw new ApiError('讨论要点最多 6 个。');
+          purpose = 'point'; payload = { session };
         } else throw new ApiError('不支持的请求。');
       }
       this.asking.add(me.id);
@@ -490,10 +610,12 @@ export class RoomCore {
   view(): RoomView {
     const room = this.room!;
     const online = new Set(this.deps.sockets().map(s => s.memberId()).filter(Boolean));
-    const members: RoomMember[] = room.members.map(m => ({ id: m.id, name: m.name, host: m.host, seat: m.seat, online: online.has(m.id) }));
+    const now = this.deps.now();
+    const members: RoomMember[] = room.members.map(m => ({ id: m.id, name: m.name, host: m.host, seat: m.seat, online: online.has(m.id), typing: online.has(m.id) && (this.typingUntil.get(m.id) ?? 0) > now }));
     return {
       id: room.id, status: room.status, setup: room.setup, members, entries: room.entries, covered: room.covered,
-      cursor: room.cursor, speaker: room.speaker, aiBusy: room.aiBusy, error: room.error, aiCalls: room.aiCalls, expiresAt: room.expiresAt
+      cursor: room.cursor, speaker: room.speaker, aiBusy: room.aiBusy, error: room.error, aiCalls: room.aiCalls, expiresAt: room.expiresAt,
+      now, turnStartedAt: room.turnStartedAt, voiceAvailable: !!this.deps.synthesize, proposals: room.proposals ?? []
     };
   }
   private broadcast() {
@@ -518,6 +640,9 @@ interface DOState {
 }
 declare const WebSocketPair: { new(): { 0: HibernatingSocket; 1: HibernatingSocket } };
 
+// 内存里最多缓存这么多音频（base64 字节数）
+const VOICE_CACHE_BYTES = 16 * 1024 * 1024;
+
 const wrap = (ws: HibernatingSocket): SocketLike => ({
   send: d => ws.send(d),
   close: (c, r) => ws.close(c, r),
@@ -525,7 +650,7 @@ const wrap = (ws: HibernatingSocket): SocketLike => ({
   setMember: id => ws.serializeAttachment({ memberId: id })
 });
 
-export function roomClass<E>(makeGenerate: (env: E) => Generate) {
+export function roomClass<E>(makeGenerate: (env: E) => Generate, makeSynthesize?: (env: E) => RoomDeps['synthesize']) {
   return class Room {
     core: RoomCore;
     ctx: DOState;
@@ -538,6 +663,7 @@ export function roomClass<E>(makeGenerate: (env: E) => Generate) {
         sockets: () => ctx.getWebSockets().map(wrap),
         setAlarm: at => ctx.storage.setAlarm(at),
         generate: makeGenerate(env),
+        synthesize: makeSynthesize?.(env),
         now: () => Date.now()
       });
     }
@@ -559,7 +685,7 @@ export function roomClass<E>(makeGenerate: (env: E) => Generate) {
       return Response.json({ error: '接口不存在。' }, { status: 404 });
     }
     async webSocketMessage(ws: HibernatingSocket, message: string | ArrayBuffer) { await this.core.onMessage(wrap(ws), message); }
-    async webSocketClose(ws: HibernatingSocket) { try { ws.close(1000); } catch { /* 已关闭 */ } await this.core.onClose(); }
+    async webSocketClose(ws: HibernatingSocket) { try { ws.close(1000); } catch { /* 已关闭 */ } await this.core.onClose(wrap(ws)); }
     async webSocketError() { await this.core.onClose(); }
     async alarm() { await this.core.alarm(); }
   };
