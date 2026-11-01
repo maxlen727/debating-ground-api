@@ -223,7 +223,7 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
         + '{"oneLine":"一句话总体评价，不超过 50 字","points":[{"label":"要点原文","status":"mastered|partial|missing","note":"不超过 30 字的依据"}],"misconceptions":[{"said":"学习者的误解，转述","fix":"正确的理解，不超过 40 字"}],"stances":[{"said":"学习者的立场，转述","note":"点评他的理由，不超过 50 字"}],"quiz":[{"q":"题干","options":["A","B","C","D"],"answer":0,"why":"不超过 40 字的解析"}]}。'
         + scope
         // 立场不是误解：评理由，不评对错（真实讨论里“LLM 应该有权利”被当成误解列出来过）
-        + 'misconceptions 只放事实上说错的、概念用错的、该区分却混在一起的地方；没有就给空数组。价值判断、立场，以及对还没有定论的问题的判断（比如 AI 有没有意识或意志），都不是误解，不放进 misconceptions，放进 stances：note 只点评理由，比如理由是否说清楚了、推理有没有跳步、有没有考虑反方最有力的理由、和他别的说法是否一致，不评判立场本身对不对；没有表达立场就给空数组。'
+        + 'misconceptions 只放事实上说错的、概念用错的、该区分却混在一起的地方；没有就给空数组。价值判断、立场，以及对还没有定论的问题的判断（比如 AI 有没有意识或意志），都不是误解，不放进 misconceptions，放进 stances：note 只点评理由，比如理由是否说清楚了、推理有没有跳步、有没有考虑反方最有力的理由、和他别的说法是否一致，不评判立场本身对不对；没有表达立场就给空数组。“应该……”“我觉得……更好”这类主张都是立场；拿不准一句话算误解还是立场时，算立场。同一句话只放进一个地方。'
         + 'quiz 出 3 道针对薄弱点的四选一单选题，只考事实和概念，不考立场，answer 是正确选项的下标（0 到 3）。';
       return { messages: pair(system, encode({ ...base, background: s.context || undefined, mode: RULES[s.mode].name, transcript: transcriptOf(s) })), output: 'review', n };
     }
@@ -260,6 +260,14 @@ export function extractJSON(raw: string): Record<string, unknown> {
   throw new ApiError('模型没有按要求返回结构化结果，请重试，或换一个更擅长遵循格式的模型。', 502);
 }
 const short = (v: unknown, max: number) => String(v ?? '').trim().slice(0, max);
+// 两句转述是不是同一个说法：去掉标点后看相邻两字的重合程度（模型转述时措辞会略有不同）
+export function sameClaim(a: string, b: string): boolean {
+  const pairs = (s: string) => { const t = Array.from(s.replace(/[\s\p{P}]/gu, '')); const out = new Set<string>(); for (let i = 0; i < t.length - 1; i++) out.add(t[i] + t[i + 1]); return out; };
+  const x = pairs(a), y = pairs(b);
+  if (!x.size || !y.size) return false;
+  let both = 0; for (const p of x) if (y.has(p)) both++;
+  return both / Math.min(x.size, y.size) >= 0.6;
+}
 const arr = (v: unknown): unknown[] => Array.isArray(v) ? v : [];
 
 export function finalize(request: BuiltRequest, result: { text: string; model: string }) {
@@ -306,6 +314,8 @@ export function finalize(request: BuiltRequest, result: { text: string; model: s
       return { q: short(q.q, 300), options, answer, why: short(q.why, 200) };
     }).filter(q => q.q)
   };
+  // 立场不能同时被当成误解：模型偶尔把同一句话两边都放（真实评测里出现过），以立场为准
+  if (review.stances?.length) review.misconceptions = review.misconceptions.filter(m => !review.stances!.some(st => sameClaim(m.said, st.said)));
   if (!review.points.length) throw new ApiError('模型返回的复盘不完整，请重试。', 502);
   return { data: review, model: result.model };
 }
