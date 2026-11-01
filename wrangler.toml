@@ -27,3 +27,7 @@ ALLOWED_ORIGINS = "https://maxlen727.github.io"
 #   npx wrangler secret put API_BASE_URL     服务商的 Base URL，例如 https://api.example.com/v1
 #   npx wrangler secret put MODEL            模型 ID
 #   npx wrangler secret put ACCESS_PASSWORD  访问口令，在界面的“设置”里填写
+# 讯飞朗读可选，启用时再设置：
+#   npx wrangler secret put XFYUN_APP_ID
+#   npx wrangler secret put XFYUN_API_KEY
+#   npx wrangler secret put XFYUN_API_SECRET
