@@ -73,6 +73,7 @@ export function validateSetup(v: unknown): RoomSetup {
     mode, concept: str(v.concept, 80, '概念'), topic: str(v.topic, 300, '讨论题'), keyPoints,
     personas: [], opening: '', seats: [], stages: [], turns: [],
     turnSeconds: [0, 30, 60, 90, 120].includes(v.turnSeconds as number) ? v.turnSeconds as number : 0,
+    context: typeof v.context === 'string' && v.context.trim() ? v.context.trim().slice(0, 600) : undefined,
     model: typeof v.model === 'string' ? v.model.slice(0, 200) : undefined
   };
   if (mode === 'roundtable') {
@@ -136,7 +137,7 @@ export function snapshotFor(room: StoredRoom, viewer: string | null, reflections
     messages,
     // 有人坐的席位是真人，没人坐的由 AI 担任
     turns: debate ? setup.turns.map(t => ({ ...t, role: { ...t.role, type: room.members.some(m => m.seat === t.role.id) ? 'human' as const : 'ai' as const } })) : undefined, cursor: debate ? room.cursor : undefined,
-    stages: debate ? setup.stages : undefined, finished: room.status === 'finished'
+    stages: debate ? setup.stages : undefined, finished: room.status === 'finished', context: setup.context
   };
 }
 
