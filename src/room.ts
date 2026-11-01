@@ -2,22 +2,25 @@
 // RoomCore 不依赖 Workers 运行时（存储、WebSocket、AI 调用都由外部传入），可以直接在 Node 里测试；
 // 文件末尾的 Room 类把它接到 Durable Object 上。
 import { ApiError } from './vendor/server/ai.ts';
-import { cleanVoice, splitForSpeech } from './vendor/shared/speech.ts';
+import { cleanVoice, splitForSpeech, type ListenEvent } from './vendor/shared/speech.ts';
 import type { ChatMessage, ExplainKind, Persona, Purpose, SessionSnapshot, Stage, StageKind, SystemLine, Turn } from './vendor/shared/types.ts';
 import { QUICK_MESSAGES, ROOM_LIMITS, type ClientMessage, type PointProposal, type CreatedRoom, type RoomMember, type RoomSeat, type RoomSetup, type RoomStatus, type RoomView, type ServerMessage, type Speaker } from './vendor/shared/room.ts';
 
-interface StoredMember { id: string; name: string; host: boolean; seat?: string; tokenHash: string; personalCalls: number; voiceCalls?: number }
+interface StoredMember { id: string; name: string; host: boolean; seat?: string; tokenHash: string; personalCalls: number; voiceCalls?: number; listenCalls?: number }
 export interface StoredRoom {
   id: string; status: RoomStatus; setup: RoomSetup; members: StoredMember[];
   entries: (ChatMessage | SystemLine)[]; covered: number[]; cursor: number; speaker: Speaker; turnStartedAt: number;
   nextPersona: number; lastMember: string | null; takeover: boolean;
   inviteHash: string; aiCalls: number; aiBusy: string | null; error: string; created: number; expiresAt: number;
-  voiceCalls?: number; proposals?: PointProposal[];   // 这两项是后加的，旧房间里可能没有
+  voiceCalls?: number; listenCalls?: number; proposals?: PointProposal[];   // 这几项是后加的，旧房间里可能没有
 }
 
 export interface SocketLike { send(data: string): void; close(code?: number, reason?: string): void; memberId(): string | null; setMember(id: string): void }
 const cleanTerms = (v: unknown) => Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string').slice(0, 3) : undefined;
 export type Generate = (purpose: Purpose, payload: unknown, onText?: (visible: string) => void) => Promise<{ text?: string; covered?: number[]; terms?: string[]; data?: unknown; model?: string }>;
+// 一段语音输入（server/stt.ts 的 Listening）；测试里换成假的
+export interface ListenSession { start(): Promise<void>; audio(b64: unknown): void; end(): void; cancel(): void; readonly finished: boolean }
+
 export interface RoomDeps {
   load(): Promise<StoredRoom | undefined>;
   save(room: StoredRoom): Promise<void>;
@@ -25,6 +28,7 @@ export interface RoomDeps {
   sockets(): SocketLike[];
   setAlarm(at: number): Promise<void>;
   synthesize?(text: string, voice: string): Promise<{ audio: string; mime: string }>;
+  listen?(emit: (e: ListenEvent) => void): ListenSession;   // 讯飞语音听写；没配就是 undefined
   generate: Generate;
   now(): number;
 }
@@ -148,6 +152,7 @@ export class RoomCore {
   private speaking = new Set<string>();              // 每位成员同一时间只合成一条朗读
   private voiceCache = new Map<string, string[]>();  // 合成过的音频（按发言和音色），同一条再听不用重新合成
   private voiceBytes = 0;
+  private listening = new Map<string, ListenSession>();  // 正在语音输入的成员
   private deps: RoomDeps;
   constructor(deps: RoomDeps) { this.deps = deps; }
 
@@ -192,7 +197,7 @@ export class RoomCore {
   }
   async onClose(ws?: SocketLike) {
     const id = ws?.memberId();
-    if (id) this.typingUntil.delete(id);
+    if (id) { this.typingUntil.delete(id); this.listening.get(id)?.cancel(); this.listening.delete(id); }
     if (await this.get()) this.broadcast();
   }
 
@@ -224,6 +229,7 @@ export class RoomCore {
       // 这两种消息很频繁：不写存储，也不触发 AI
       if (msg.type === 'typing') return this.typing(me, msg.active);
       if (msg.type === 'quickMessage') return this.quick(room, me, msg.text);
+      if (msg.type === 'listen') return await this.listen(ws, room, me, msg);
       await this.act(room, me, msg);
     } catch (e) {
       this.send(ws, { type: 'error', message: e instanceof ApiError ? e.message : '后端未能完成这个操作。' });
@@ -256,7 +262,7 @@ export class RoomCore {
   }
 
   /* ---------- 讨论流程 ---------- */
-  private async act(room: StoredRoom, me: StoredMember, msg: Exclude<ClientMessage, { type: 'hello' | 'resume' | 'ask' | 'speak' | 'typing' | 'quickMessage' }>) {
+  private async act(room: StoredRoom, me: StoredMember, msg: Exclude<ClientMessage, { type: 'hello' | 'resume' | 'ask' | 'speak' | 'typing' | 'quickMessage' | 'listen' }>) {
     const hostOnly = () => { if (!me.host) throw new ApiError('只有房主可以这样做。'); };
     const live = () => { if (room.status !== 'live') throw new ApiError(room.status === 'lobby' ? '讨论还没有开始。' : '讨论已经结束。'); };
     const idle = () => { if (this.running) throw new ApiError('AI 正在发言，请稍等。'); };
@@ -543,6 +549,40 @@ export class RoomCore {
       this.remember(key, audio);
     } finally { this.speaking.delete(me.id); }
   }
+  /* ---------- 语音输入 ---------- */
+  // 也走房主的讯飞额度，单独计数；录音只转发不保存，识别结果只回给说话的人，由他自己决定发不发
+  private async listen(ws: SocketLike, room: StoredRoom, me: StoredMember, msg: Extract<ClientMessage, { type: 'listen' }>) {
+    const reply = (event: ListenEvent) => this.send(ws, { type: 'heard', event });
+    const current = this.listening.get(me.id);
+    if (msg.op !== 'start') {
+      if (!current) return;
+      if (msg.op === 'audio') current.audio(msg.audio);
+      else if (msg.op === 'end') current.end();
+      else { current.cancel(); this.listening.delete(me.id); }
+      return;
+    }
+    try {
+      if (!this.deps.listen) throw new ApiError('房主的后端还没有配置讯飞语音。', 503);
+      if (room.status === 'finished') throw new ApiError('讨论已经结束。');
+      if (current && !current.finished) throw new ApiError('上一段语音还没有识别完。');
+      if ((me.listenCalls ?? 0) >= ROOM_LIMITS.personalListen) throw new ApiError('你在这个房间里的语音输入次数已经用完。', 429);
+      if ((room.listenCalls ?? 0) >= ROOM_LIMITS.listenCalls) throw new ApiError('这个房间的语音输入次数已经用完。', 429);
+      me.listenCalls = (me.listenCalls ?? 0) + 1; room.listenCalls = (room.listenCalls ?? 0) + 1;
+      await this.save();
+      const session = this.deps.listen(e => {
+        reply(e);
+        if (e.type === 'error' || (e.type === 'text' && e.final)) { if (this.listening.get(me.id) === session) this.listening.delete(me.id); }
+      });
+      this.listening.set(me.id, session);
+      try { await session.start(); }
+      catch (e) { this.listening.delete(me.id); throw e; }
+      reply({ type: 'ready' });
+    } catch (e) {
+      // 只撤掉这次没开起来的；上一段还在识别的不受影响
+      reply({ type: 'error', message: e instanceof ApiError ? e.message : '无法开始语音识别。' });
+    }
+  }
+
   private remember(key: string, audio: string[]) {
     const size = audio.reduce((n, a) => n + a.length, 0);
     if (size > VOICE_CACHE_BYTES / 4) return;
@@ -615,7 +655,7 @@ export class RoomCore {
     return {
       id: room.id, status: room.status, setup: room.setup, members, entries: room.entries, covered: room.covered,
       cursor: room.cursor, speaker: room.speaker, aiBusy: room.aiBusy, error: room.error, aiCalls: room.aiCalls, expiresAt: room.expiresAt,
-      now, turnStartedAt: room.turnStartedAt, voiceAvailable: !!this.deps.synthesize, proposals: room.proposals ?? []
+      now, turnStartedAt: room.turnStartedAt, voiceAvailable: !!this.deps.synthesize, listenAvailable: !!this.deps.listen, proposals: room.proposals ?? []
     };
   }
   private broadcast() {
@@ -650,7 +690,7 @@ const wrap = (ws: HibernatingSocket): SocketLike => ({
   setMember: id => ws.serializeAttachment({ memberId: id })
 });
 
-export function roomClass<E>(makeGenerate: (env: E) => Generate, makeSynthesize?: (env: E) => RoomDeps['synthesize']) {
+export function roomClass<E>(makeGenerate: (env: E) => Generate, makeSynthesize?: (env: E) => RoomDeps['synthesize'], makeListen?: (env: E) => RoomDeps['listen']) {
   return class Room {
     core: RoomCore;
     ctx: DOState;
@@ -664,6 +704,7 @@ export function roomClass<E>(makeGenerate: (env: E) => Generate, makeSynthesize?
         setAlarm: at => ctx.storage.setAlarm(at),
         generate: makeGenerate(env),
         synthesize: makeSynthesize?.(env),
+        listen: makeListen?.(env),
         now: () => Date.now()
       });
     }
