@@ -42,6 +42,7 @@ export interface Review {
   oneLine: string;
   points: { label: string; status: PointStatus; note: string }[];
   misconceptions: { said: string; fix: string }[];
+  stances?: { said: string; note: string }[];   // 学习者的立场：只点评理由，不判对错（旧卡片没有这一项）
   quiz: QuizItem[];
 }
 
@@ -59,9 +60,11 @@ export interface SessionSnapshot {
   cursor?: number;
   stages?: Stage[];
   finished?: boolean;
+  context?: string;     // 学习者交代的背景（具体事件类的话题）
 }
 
-export interface PrepareResult { concept: string; topic: string; keyPoints: string[]; roles: { name: string; title: string; persona: string }[]; opening: string }
+// needsContext：输入是一件具体的事、模型不了解经过时，先请学习者交代背景（这时其他字段为空）
+export interface PrepareResult { concept: string; topic: string; keyPoints: string[]; roles: { name: string; title: string; persona: string }[]; opening: string; needsContext?: string }
 
 export type Purpose = 'prepare' | 'discuss' | 'debate' | 'hint' | 'explain' | 'reflect' | 'review' | 'term' | 'point';
 
@@ -75,7 +78,7 @@ export interface CoverResult { text: string; covered: number[]; terms?: string[]
 export interface DataResult<T> { data: T; model?: string }
 
 export interface PayloadMap {
-  prepare: { concept: string; mode: ModeId; previous?: Previous | null };
+  prepare: { concept: string; mode: ModeId; previous?: Previous | null; context?: string };
   discuss: { session: SessionSnapshot; roleId: string; task?: string };
   debate: { session: SessionSnapshot };
   hint: { session: SessionSnapshot; covered: number[]; task?: string };

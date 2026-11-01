@@ -46,6 +46,7 @@ export interface RoomSetup {
   turns: Turn[];
   model?: string;
   turnSeconds?: number;  // 每次发言的提示时限，0 表示不计时；到点只提醒，不打断
+  context?: string;      // 房主交代的背景（具体事件类的话题）
 }
 
 export interface RoomMember { id: string; name: string; host: boolean; online: boolean; seat?: string; typing?: boolean }
