@@ -64,6 +64,7 @@ export interface SessionSnapshot {
   finished?: boolean;
   context?: string;     // 学习者交代的背景（具体事件类的话题）
   branch?: { topic: string; from: string; path: string[] };   // 知识画布：正在聊的分支、从哪句话展开、上层分支的话题
+  teaching?: boolean;   // 苏格拉底追问里“换我来讲”：AI 暂时当听讲的学生
 }
 
 // needsContext：输入是一件具体的事、模型不了解经过时，先请学习者交代背景（这时其他字段为空）
