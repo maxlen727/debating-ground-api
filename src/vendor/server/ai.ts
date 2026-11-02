@@ -63,6 +63,8 @@ const RULES: Record<ModeId, { name: string; topic: string; roles: string; turn: 
     turn: '你是陪学习者一起把概念想明白的伙伴。这是一张“知识画布”：讨论是树状的，学习者遇到想深挖的词或问题，会从某句话展开一个分支单独聊，聊完带一句自己的小结回来。在主干上，围绕讨论题往前走；碰到值得单独弄懂的相关概念，点到为止就好，学习者想深挖会自己展开。资料里“学习者的小结”是他从分支带回来的，接着它往下聊。'
   }
 };
+// 苏格拉底追问里“换我来讲”（费曼学习法）：同一位伙伴暂时当听讲的学生。反向讲解模式并进来以后用这一条
+const SWAP_RULE = '现在换学习者来讲：他是老师，你暂时扮演一个聪明但对这个概念一无所知的学生，不再是讨论伙伴。' + RULES.teach.turn;
 // 知识画布的分支：只聊这一枝，别急着回主干（回不回去由学习者决定）
 const BRANCH_RULE = '现在是从主干岔出去的一个分支，专门弄懂资料中 branch.topic；branch.from 是展开它的那句话，branch.path 是外层分支的话题。只围绕这个话题聊，把它讲透：它是什么、一个具体例子、它和讨论的概念有什么关系。不要急着把话题拉回主干，也不必顾及要点清单；学习者想回去时会自己回去。';
 
@@ -126,6 +128,7 @@ function checkSession(v: unknown): SessionSnapshot {
   if (!Array.isArray(kp) || !kp.length || kp.length > 8 || kp.some(k => typeof k !== 'string' || k.length > 60)) throw new ApiError('要点清单无效。');
   if (!Array.isArray(v.messages) || !Array.isArray(v.roles)) throw new ApiError('讨论上下文不完整。');
   if (v.context !== undefined && (typeof v.context !== 'string' || v.context.length > 600)) throw new ApiError('背景太长了，请控制在 600 字以内。');
+  if (v.teaching !== undefined && (v.teaching !== true || v.mode !== 'socratic')) throw new ApiError('讲解状态无效。');
   if (v.branch !== undefined) {
     const b = v.branch;
     if (v.mode !== 'canvas' || !isObj(b) || !Array.isArray(b.path) || b.path.length > 8) throw new ApiError('分支信息无效。');
@@ -192,8 +195,8 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
       const task = typeof p.task === 'string' ? p.task.slice(0, 300) : '';
       const branch = s.mode === 'canvas' ? s.branch : undefined;
       const system = COMMON + `你在一个用讨论来学习概念的应用里扮演「${name}」（${title}）。${persona ? '你的背景：' + persona + '。背景只影响你的知识范围和表达方式，不要照读。' : ''}`
-        + RULES[s.mode].turn + (branch ? BRANCH_RULE : '') + PARTNER_RULE + paceRule(s) + VOICE_RULE + '不超过 150 字。' + SPEECH_RULE + COVER_RULE + TERM_RULE;
-      return { messages: pair(system, encode({ ...base, background: s.context || undefined, mode: RULES[s.mode].name, you: name, branch, transcript: transcriptOf(s), extraRequest: task || undefined })), output: 'cover', n, exclude: branch ? [...excludeOf(s), branch.topic] : excludeOf(s) };
+        + RULES[s.mode].turn + (branch ? BRANCH_RULE : '') + PARTNER_RULE + (s.teaching ? SWAP_RULE : '') + paceRule(s) + VOICE_RULE + '不超过 150 字。' + SPEECH_RULE + COVER_RULE + TERM_RULE;
+      return { messages: pair(system, encode({ ...base, background: s.context || undefined, mode: RULES[s.mode].name, you: name, branch, learnerIsTeaching: s.teaching || undefined, transcript: transcriptOf(s), extraRequest: task || undefined })), output: 'cover', n, exclude: branch ? [...excludeOf(s), branch.topic] : excludeOf(s) };
     }
     case 'debate': {
       if (s.mode !== 'debate' || !Array.isArray(s.turns) || !Number.isInteger(s.cursor)) throw new ApiError('比赛上下文不完整。');
@@ -247,6 +250,7 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
         ? 'points 按资料中的核心争点逐条给出，label 写争点原文：status 评价学习者对这个争点涉及的概念和判断标准理解得怎样（mastered 能讲清并正确运用，partial 涉及了但不完整或有偏差，missing 没有涉及）；不评判辩论输赢，也不因为立场不同而扣分。'
         : 'points 必须按要点清单逐条给出；'
           // 知识画布：分支里的发言和主干一样算数
+          + (s.mode === 'socratic' ? 'action 写着“讲给伙伴听”的发言，是学习者换过来当老师讲给别人听的，最能看出他是不是真懂。' : '')
           + (s.mode === 'canvas' ? '这次讨论是树状的：action 写着“分支：…”的发言，是学习者从主干岔出去单独弄懂的话题，和主干上的发言一样算数。' : '');
       const system = COMMON + '你是一个学习应用的复盘老师。根据讨论记录判断学习者对概念的理解。只依据学习者本人的发言和小结判断（资料中 speaker 带“学习者”字样的是学习者）；其他角色说出的内容不代表学习者懂了。只输出一个 JSON 对象，不要任何说明或代码块标记。格式：'
         + '{"oneLine":"一句话总体评价，不超过 50 字","points":[{"label":"要点原文","status":"mastered|partial|missing","note":"不超过 30 字的依据"}],"misconceptions":[{"said":"学习者的误解，转述","fix":"正确的理解，不超过 40 字"}],"stances":[{"said":"学习者的立场，转述","note":"点评他的理由，不超过 50 字"}],"quiz":[{"q":"题干","options":["A","B","C","D"],"answer":0,"why":"不超过 40 字的解析"}]}。'
