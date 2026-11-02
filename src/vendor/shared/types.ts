@@ -64,7 +64,8 @@ export interface SessionSnapshot {
 }
 
 // needsContext：输入是一件具体的事、模型不了解经过时，先请学习者交代背景（这时其他字段为空）
-export interface PrepareResult { concept: string; topic: string; keyPoints: string[]; roles: { name: string; title: string; persona: string }[]; opening: string; needsContext?: string }
+// debaters：辩论时正反双方每个席位的认知背景（按论题生成，最多各 4 个）
+export interface PrepareResult { concept: string; topic: string; keyPoints: string[]; roles: { name: string; title: string; persona: string }[]; opening: string; needsContext?: string; debaters?: Record<Team, string[]> }
 
 export type Purpose = 'prepare' | 'discuss' | 'debate' | 'hint' | 'explain' | 'reflect' | 'review' | 'term' | 'point';
 
@@ -78,7 +79,7 @@ export interface CoverResult { text: string; covered: number[]; terms?: string[]
 export interface DataResult<T> { data: T; model?: string }
 
 export interface PayloadMap {
-  prepare: { concept: string; mode: ModeId; previous?: Previous | null; context?: string };
+  prepare: { concept: string; mode: ModeId; previous?: Previous | null; context?: string; topic?: string };   // topic：讨论题已定，只按它重新设定角色
   discuss: { session: SessionSnapshot; roleId: string; task?: string };
   debate: { session: SessionSnapshot };
   hint: { session: SessionSnapshot; covered: number[]; task?: string };

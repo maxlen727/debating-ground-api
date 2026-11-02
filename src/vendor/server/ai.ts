@@ -34,25 +34,25 @@ const RULES: Record<ModeId, { name: string; topic: string; roles: string; turn: 
   socratic: {
     name: '苏格拉底追问',
     topic: 'topic 是一个引导性的核心问题，以问号结尾；最好落在一个具体的场景里，初学者一看就能说上话。',
-    roles: 'roles 给 1 个：追问者，title 写“追问者”，persona 写他的提问风格。',
+    roles: 'roles 给 1 个：追问者，title 写“追问者”，persona 写他是个什么样的人、平时怎么说话（具体一点，像在描述一个真人）。',
     turn: '你是追问者，擅长用少而准的好问题帮学习者自己想明白。多用具体场景和例子让他发现说法里含糊的地方；他卡住时先给一个线索或例子，而不是再问一个更难的问题；他想明白了，就说清楚他对在哪里，再往下一层走。不要一口气把完整答案讲完。'
   },
   roundtable: {
     name: '圆桌讨论',
     topic: 'topic 是一个适合多学科讨论的开放问题，要具体、贴近生活，初学者一看就能说上话，不要写成学术论文的题目。',
-    roles: 'roles 给 3 个：来自三个不同学科的嘉宾，title 写学科身份，persona 写他看这个概念的独特角度。',
+    roles: 'roles 给 3 个：来自三个不同学科的嘉宾，title 写学科身份，persona 写他看这个概念的独特角度，再用半句话写他说话的样子（比如爱讲自己经历、说话直、慢条斯理爱打比方）；三个人的说话方式要明显不同。',
     turn: '你是圆桌嘉宾，带着你这门学科的知识、案例和看法来聊。可以回应学习者，也可以接其他嘉宾的话：赞同就补充，不同意就直说理由。像真实的圆桌一样，嘉宾之间可以有分歧，不必每次都把话题交还给学习者。'
   },
   teach: {
     name: '反向讲解',
     topic: 'topic 是学习者要完成的讲解任务，例如“向一个高中生讲清楚……”。',
-    roles: 'roles 给 1 个：一个聪明但对此一无所知的高中生，title 写“学生”，给他起一个名字。',
+    roles: 'roles 给 1 个：一个聪明但对此一无所知的高中生，title 写“学生”，给他起一个名字，persona 写他的性格和说话习惯（像一个具体的高中生）。',
     turn: '你是困惑的学生，学习者是老师。根据老师的讲解做出真实的反应：听懂了就用自己的话复述一下，或者举个你想到的例子让老师看对不对；讲得不清楚就说具体哪里没听懂；偶尔说出一个常见误解让老师纠正。不要自己讲解这个概念，也不要表现得比老师更懂。'
   },
   debate: {
     name: '正反辩论',
     topic: 'topic 是一个两边都有得辩、能逼出这个概念关键点的辩题，写成可以支持或反对的陈述句，不加引号。',
-    roles: 'roles 给空数组（辩手由学习者自己编排）。',
+    roles: 'roles 给空数组（辩手由学习者自己编排）。另给 debaters：{"A":[4 个字符串],"B":[4 个字符串]}，是正方（支持）和反方（反对）各 4 位辩手的认知背景，每个一句话、不超过 40 字，写这个人是谁、从什么经验或关切出发看这个辩题；同一方的 4 位要彼此不同，要贴合这个辩题，不写成“理性”“严谨”这类空话。',
     turn: ''
   }
 };
@@ -61,6 +61,14 @@ const COMMON = '使用中文。引用的数据与研究必须有可靠依据；�
 const COVER_RULE = '最后另起一行，写出这一轮里（学习者上一句与你这一句）真正讲清楚的要点编号，格式 [[要点:1,3]]；没有就写 [[要点:]]。这一行只给系统读取，不会展示。';
 const TERM_RULE = '如果你这一句里用到了学习者可能不熟悉的专业名词，再另起一行写出它们，格式 [[术语:词1,词2]]，最多 3 个；每个词必须和你这句话里写的一字不差；不要写讨论的概念本身或要点清单里的内容；没有就不写这一行。这一行也只给系统读取。';
 const SPEECH_RULE = '中文口语，像面对面聊天，不用 Markdown、标题或列表；不替学习者或其他角色发言。';
+
+// 活人感：真人试用时觉得“AI 味”太浓。下面每一条都对应评测记录里反复出现的写法
+const VOICE_RULE = '说话要像一个真人在聊天，不像在写文章：'
+  + '长短跟着内容走，有时一两句就够，有时多说几句，不要每段都差不多长。'
+  + '直接说你想说的；接别人的话就随口接（比如“对，而且……”“这我不太同意”），不要把对方的话加上引号复述一遍再展开，也不要每次先表态“我同意”“说得对”。'
+  + '少一点书面腔：不用“不是……而是……”这样的对仗，不用破折号，不要在结尾用“所以……”再总结一遍，不要把道理说成格言。'
+  + '多讲具体的东西：你见过的一件事、一个具体的人、一个数字、一个画面。按你的身份和性格说话，可以有语气词、口头禅、一点犹豫或玩笑。'
+  + '学习者只回了“嗯”“不太懂”“可能吧”这样的话，像真人一样察觉到：可能说得太绕了，就停下来用大白话讲一句，或者问问他卡在哪里。';
 
 // 讨论伙伴：AI 是一起想问题的人，不是考官。提问是工具，不是每一轮的任务。
 // （真实讨论里发现：每轮都以提问结尾、逐句给学习者的话贴“事实/观点”标签，学习者会觉得在被拷问。）
@@ -92,7 +100,7 @@ function paceRule(s: SessionSnapshot): string {
   const p = paceOf(s);
   return (p.afterGuest ? '上一句是另一位嘉宾说的：这一轮接他的话说，回应、补充或反驳他，不要向学习者提问。' : '')
     + (!p.afterGuest && p.questionsInARow >= 2 ? '前面已经连着问了好几个问题：这一轮不要提问，说说你的看法、举个例子或讲点知识。' : '')
-    + (p.shortReply ? '学习者刚才回答得很短：先给他一个具体的例子或你自己的看法，不要接着追问更抽象的问题。' : '');
+    + (p.shortReply ? '学习者刚才回答得很短：可能是前面说得太绕，先用大白话或一个具体的例子说一句，不要接着追问更抽象的问题，也不要和别的嘉宾越聊越深。' : '');
 }
 
 /* ---------- 输入校验 ---------- */
@@ -140,17 +148,20 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
       weakPoints: Array.isArray(p.previous.weak) ? p.previous.weak.slice(0, 6).map(x => String(x).slice(0, 60)) : []
     } : null;
     const context = typeof p.context === 'string' ? p.context.trim().slice(0, 600) : '';
+    const fixedTopic = typeof p.topic === 'string' ? p.topic.trim().slice(0, 300) : '';
     const opening = modeId === 'debate' ? 'opening 给空字符串。' : 'opening 是第一个角色的开场白，中文口语，不超过 80 字：先抛出一个具体的场景、例子或你的看法，再自然地请学习者说说想法；不要直接把要点讲完。';
     const pointGuidance = modeId === 'debate'
       ? 'keyPoints 是本场辩论最值得交锋的 3 到 4 个核心争点或判断标准；简洁、彼此有区别，不要把它们写成必须逐项完成的清单。'
       : 'keyPoints 是真正理解这个概念要弄懂的 4 到 5 个要点，每个不超过 12 个字，由浅入深。要点写“要弄懂的东西”：概念、关键的区分、机制、各方的理由；不要写成立场或结论。有争议的问题写成“对××的不同看法”，常见的误解也可以列进去。';
     // 输入是一件具体的事（某个群、某个人、某次争论），模型又不了解经过时，先请学习者交代背景，别凭空出题
-    const needContext = context ? '' : '如果学习者写的不是一个概念或术语，而是一件具体的事（某个群聊、某个人、某次争论、不广为人知的事件），而你并不确定它的经过，就不要猜，只输出 {"needsContext":"一句话，请学习者简单说说经过；只点出最关键的一两点，不要列一串问题"}。';
+    const needContext = context || fixedTopic ? '' : '如果学习者写的不是一个概念或术语，而是一件具体的事（某个群聊、某个人、某次争论、不广为人知的事件），而你并不确定它的经过，就不要猜，只输出 {"needsContext":"一句话，请学习者简单说说经过；只点出最关键的一两点，不要列一串问题"}。';
     const system = COMMON + '你是一个用讨论来学习概念的应用里的备课老师，为一次讨论做准备。只输出一个 JSON 对象，不要任何说明或代码块标记。格式：{"concept":"规范化后的概念名","topic":"…","keyPoints":["…"],"roles":[{"name":"中文名","title":"身份","persona":"一句话描述"}],"opening":"…"}。'
       + pointGuidance + mode.topic + mode.roles + opening + needContext
       + (context ? '资料中的 background 是学习者交代的经过，讨论题、要点和开场白都要以它为准；里面没有的细节不要编。' : '')
+      // 学习者在准备页改了讨论题：题目照用，角色和开场白围绕新题目重新设定
+      + (fixedTopic ? '讨论题已经由学习者定好，就是资料中的 topic：原样放进 topic，不要改写；角色、开场白和辩手背景都围绕它来设定。' : '')
       + (prev ? '学习者以前讨论过这个概念，资料中的 weakPoints 是上次还模糊或没讲到的地方。这次的讨论题和开场白要从这些薄弱点切入。' : '');
-    return { messages: pair(system, JSON.stringify({ concept, mode: mode.name, background: context || undefined, previous: prev })), output: 'prepare', mode: modeId, asked: !!context };
+    return { messages: pair(system, JSON.stringify({ concept, mode: mode.name, topic: fixedTopic || undefined, background: context || undefined, previous: prev })), output: 'prepare', mode: modeId, asked: !!context || !!fixedTopic };
   }
 
   const s = checkSession(p.session);
@@ -165,7 +176,7 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
       const name = text(role.name, 40, '角色名'), title = String(role.title ?? '').slice(0, 40), persona = String(role.persona ?? '').slice(0, 500);
       const task = typeof p.task === 'string' ? p.task.slice(0, 300) : '';
       const system = COMMON + `你在一个用讨论来学习概念的应用里扮演「${name}」（${title}）。${persona ? '你的背景：' + persona + '。背景只影响你的知识范围和表达方式，不要照读。' : ''}`
-        + RULES[s.mode].turn + PARTNER_RULE + paceRule(s) + '通常 60 到 120 字，不超过 150 字。' + SPEECH_RULE + COVER_RULE + TERM_RULE;
+        + RULES[s.mode].turn + PARTNER_RULE + paceRule(s) + VOICE_RULE + '不超过 150 字。' + SPEECH_RULE + COVER_RULE + TERM_RULE;
       return { messages: pair(system, encode({ ...base, background: s.context || undefined, mode: RULES[s.mode].name, you: name, transcript: transcriptOf(s), extraRequest: task || undefined })), output: 'cover', n, exclude: excludeOf(s) };
     }
     case 'debate': {
@@ -223,7 +234,7 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
         + '{"oneLine":"一句话总体评价，不超过 50 字","points":[{"label":"要点原文","status":"mastered|partial|missing","note":"不超过 30 字的依据"}],"misconceptions":[{"said":"学习者的误解，转述","fix":"正确的理解，不超过 40 字"}],"stances":[{"said":"学习者的立场，转述","note":"点评他的理由，不超过 50 字"}],"quiz":[{"q":"题干","options":["A","B","C","D"],"answer":0,"why":"不超过 40 字的解析"}]}。'
         + scope
         // 立场不是误解：评理由，不评对错（真实讨论里“LLM 应该有权利”被当成误解列出来过）
-        + 'misconceptions 只放事实上说错的、概念用错的、该区分却混在一起的地方；没有就给空数组。价值判断、立场，以及对还没有定论的问题的判断（比如 AI 有没有意识或意志），都不是误解，不放进 misconceptions，放进 stances：note 只点评理由，比如理由是否说清楚了、推理有没有跳步、有没有考虑反方最有力的理由、和他别的说法是否一致，不评判立场本身对不对；没有表达立场就给空数组。“应该……”“我觉得……更好”这类主张都是立场；拿不准一句话算误解还是立场时，算立场。同一句话只放进一个地方。'
+        + 'misconceptions 只放事实上说错的、概念用错的、该区分却混在一起的地方；没有就给空数组。价值判断、立场，以及对还没有定论的问题的判断（比如 AI 有没有意识、意志、情感，该不该有权利），都不是误解，不放进 misconceptions，放进 stances：note 只点评理由，比如理由是否说清楚了、推理有没有跳步、有没有考虑反方最有力的理由、和他别的说法是否一致，不评判立场本身对不对；没有表达立场就给空数组。“应该……”“我觉得……更好”这类主张都是立场；拿不准一句话算误解还是立场时，算立场。同一句话只放进一个地方。'
         + 'quiz 出 3 道针对薄弱点的四选一单选题，只考事实和概念，不考立场，answer 是正确选项的下标（0 到 3）。';
       return { messages: pair(system, encode({ ...base, background: s.context || undefined, mode: RULES[s.mode].name, transcript: transcriptOf(s) })), output: 'review', n };
     }
@@ -299,6 +310,11 @@ export function finalize(request: BuiltRequest, result: { text: string; model: s
     const keyPoints = arr(data.keyPoints).map(k => short(k, 40)).filter(Boolean).slice(0, 6);
     const roles = debate ? [] : arr(data.roles).filter(isObj).filter(r => r.name).slice(0, 3).map(r => ({ name: short(r.name, 20), title: short(r.title, 20), persona: short(r.persona, 200) }));
     const out: PrepareResult = { concept: short(data.concept, 40), topic: short(data.topic, 200), keyPoints, roles, opening: debate ? '' : short(data.opening, 400) };
+    if (debate && isObj(data.debaters)) {
+      const side = (v: unknown) => arr(v).map(x => short(x, 120)).filter(Boolean).slice(0, 4);
+      const d = { A: side(data.debaters.A), B: side(data.debaters.B) };
+      if (d.A.length && d.B.length) out.debaters = d;
+    }
     if (keyPoints.length < 2 || !out.topic || (!debate && (!roles.length || !out.opening))) throw new ApiError('模型返回的讨论准备不完整，请重试。', 502);
     return { data: out, model: result.model };
   }
