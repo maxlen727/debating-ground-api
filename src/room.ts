@@ -4,7 +4,7 @@
 import { ApiError } from './vendor/server/ai.ts';
 import { cleanVoice, splitForSpeech, type ListenEvent } from './vendor/shared/speech.ts';
 import type { ChatMessage, ExplainKind, Persona, Purpose, SessionSnapshot, Stage, StageKind, SystemLine, Turn } from './vendor/shared/types.ts';
-import { QUICK_MESSAGES, ROOM_LIMITS, type ClientMessage, type PointProposal, type CreatedRoom, type RoomMember, type RoomSeat, type RoomSetup, type RoomStatus, type RoomView, type ServerMessage, type Speaker } from './vendor/shared/room.ts';
+import { QUICK_MESSAGES, ROOM_CHAT, ROOM_LIMITS, type ClientMessage, type PointProposal, type CreatedRoom, type RoomMember, type RoomSeat, type RoomSetup, type RoomStatus, type RoomView, type ServerMessage, type Speaker } from './vendor/shared/room.ts';
 
 interface StoredMember { id: string; name: string; host: boolean; seat?: string; tokenHash: string; personalCalls: number; voiceCalls?: number; listenCalls?: number }
 export interface StoredRoom {
@@ -13,6 +13,8 @@ export interface StoredRoom {
   nextPersona: number; lastMember: string | null; takeover: boolean;
   inviteHash: string; aiCalls: number; aiBusy: string | null; error: string; created: number; expiresAt: number;
   voiceCalls?: number; listenCalls?: number; proposals?: PointProposal[];   // 这几项是后加的，旧房间里可能没有
+  // 圆桌群聊：有人说话后，等到 aiDueAt 由 AI 嘉宾接话；pendingSince 是这一阵最早的一句
+  aiDueAt?: number; pendingSince?: number; aiPaused?: boolean;
 }
 
 export interface SocketLike { send(data: string): void; close(code?: number, reason?: string): void; memberId(): string | null; setMember(id: string): void }
@@ -150,6 +152,7 @@ export class RoomCore {
   // 以下只在内存里：Durable Object 休眠后清空也没关系
   private typingUntil = new Map<string, number>();   // 正在输入，按成员
   private lastQuick = new Map<string, number>();     // 上一次快捷短语的时间
+  private lastSay = new Map<string, number>();       // 圆桌里每人上一次发言的时间
   private speaking = new Set<string>();              // 每位成员同一时间只合成一条朗读
   private voiceCache = new Map<string, string[]>();  // 合成过的音频（按发言和音色），同一条再听不用重新合成
   private voiceBytes = 0;
@@ -202,13 +205,52 @@ export class RoomCore {
     if (await this.get()) this.broadcast();
   }
 
+  // 一个 Durable Object 只有一个闹钟：同时管房间到期和圆桌里 AI 嘉宾什么时候接话
   async alarm() {
     const room = await this.get();
     if (!room) return;
-    if (this.deps.now() < room.expiresAt) return this.deps.setAlarm(room.expiresAt);
-    for (const ws of this.deps.sockets()) this.close(ws, '房间已到期，讨论内容已从后端删除。');
-    this.room = undefined; this.loading = null;
-    await this.deps.destroy();
+    const now = this.deps.now();
+    if (now >= room.expiresAt) {
+      for (const ws of this.deps.sockets()) this.close(ws, '房间已到期，讨论内容已从后端删除。');
+      this.room = undefined; this.loading = null;
+      await this.deps.destroy();
+      return;
+    }
+    if (room.aiDueAt && now >= room.aiDueAt) {
+      // AI 还在说上一段：过一会儿再看
+      if (this.running) { room.aiDueAt = now + 1500; return this.deps.setAlarm(this.nextAlarm(room)); }
+      room.aiDueAt = undefined; room.pendingSince = undefined;
+      await this.chatReply(room);
+    }
+    await this.deps.setAlarm(this.nextAlarm(room));
+  }
+  private nextAlarm(room: StoredRoom) { return room.aiDueAt ? Math.min(room.aiDueAt, room.expiresAt) : room.expiresAt; }
+
+  /* ---------- 圆桌群聊 ---------- */
+  // 有人说了话：等大家停一停再让 AI 嘉宾接话；一直有人说，最多等 maxWaitMs
+  private async scheduleReply(room: StoredRoom) {
+    if (room.setup.mode !== 'roundtable' || room.status !== 'live' || room.aiPaused) return;
+    const now = this.deps.now();
+    room.pendingSince ??= now;
+    room.aiDueAt = Math.min(now + ROOM_CHAT.replyAfterMs, room.pendingSince + ROOM_CHAT.maxWaitMs);
+    await this.deps.setAlarm(this.nextAlarm(room));
+  }
+  // 谁来接：最近的话里点了哪位嘉宾的名字就是他；否则轮流，尽量不让同一位连着说
+  private pickGuest(room: StoredRoom): string {
+    const list = room.setup.personas;
+    const lastAi = [...room.entries].reverse().find(e => e.kind === 'msg' && !e.memberId);
+    const lastAiAt = lastAi ? room.entries.indexOf(lastAi) : -1;
+    const recent = room.entries.slice(lastAiAt + 1).filter(e => e.kind === 'msg' && e.memberId).map(e => (e as ChatMessage).text).join('\n');
+    const named = list.find(p => recent.includes(p.name));
+    if (named) return named.id;
+    let id = this.nextPersona(room);
+    if (list.length > 1 && lastAi && lastAi.kind === 'msg' && lastAi.who === id) id = this.nextPersona(room);
+    return id;
+  }
+  private async chatReply(room: StoredRoom) {
+    if (room.status !== 'live' || room.aiPaused || room.error) return;
+    room.speaker = { kind: 'ai', id: this.pickGuest(room) };
+    await this.runAI(room);
   }
 
   async onMessage(ws: SocketLike, raw: unknown) {
@@ -297,20 +339,23 @@ export class RoomCore {
         const firstTurn = room.setup.turns[room.cursor];
         room.turnStartedAt = room.setup.mode === 'debate' && firstTurn && !this.waitsForPerson(firstTurn.role) ? 0 : this.deps.now();
         room.entries.push({ id: uid(), kind: 'sys', text: '讨论开始。' });
-        if (room.setup.mode === 'roundtable') room.speaker = { kind: 'member', id: me.id };
+        if (room.setup.mode === 'roundtable') { room.speaker = null; room.turnStartedAt = 0; }
         break;
       }
       case 'say': {
-        live(); idle();
+        live();
+        const roundtable = room.setup.mode === 'roundtable';
+        if (!roundtable) idle();   // 辩论按赛制轮流；圆桌是群聊，AI 说着话也能插嘴
         const text = str(msg.text, ROOM_LIMITS.textLength, '发言');
         this.roomFull(room);
         this.typingUntil.delete(me.id);
-        if (room.setup.mode === 'roundtable') {
-          if (room.speaker?.kind !== 'member' || room.speaker.id !== me.id) throw new ApiError('还没轮到你发言。');
+        if (roundtable) {
+          const now = this.deps.now();
+          if (now - (this.lastSay.get(me.id) ?? -Infinity) < ROOM_CHAT.gapMs) throw new ApiError('说得太快了，稍等一下。');
+          this.lastSay.set(me.id, now);
           room.entries.push({ id: uid(), kind: 'msg', who: me.id, memberId: me.id, name: me.name, human: true, text, source: 'human' });
           room.lastMember = me.id;
-          room.speaker = { kind: 'ai', id: this.nextPersona(room) };
-          room.turnStartedAt = 0;
+          await this.scheduleReply(room);
         } else {
           const t = room.setup.turns[room.cursor];
           if (!t || me.seat !== t.role.id) throw new ApiError('还没轮到你的席位发言。');
@@ -321,13 +366,8 @@ export class RoomCore {
       }
       case 'pass': {
         live(); idle();
-        if (room.setup.mode === 'roundtable') {
-          const sp = room.speaker;
-          if (!(me.host || (sp?.kind === 'member' && sp.id === me.id))) throw new ApiError('只有当前发言的人或房主可以跳过。');
-          room.speaker = { kind: 'member', id: this.nextMember(room, sp?.kind === 'member' ? sp.id : room.lastMember) };
-          room.turnStartedAt = this.deps.now();
-          room.error = '';
-        } else {
+        if (room.setup.mode === 'roundtable') throw new ApiError('圆桌是群聊，想说就说，不用跳过。');
+        {
           const t = room.setup.turns[room.cursor];
           if (!t) throw new ApiError('比赛已经结束。');
           if (!(me.host || me.seat === t.role.id)) throw new ApiError('只有当前席位的同学或房主可以跳过。');
@@ -341,10 +381,11 @@ export class RoomCore {
         hostOnly(); live(); idle();
         if (room.setup.mode !== 'roundtable') throw new ApiError('辩论按赛制轮流发言。');
         const target = msg.target;
-        if (target?.kind === 'member' && room.members.some(m => m.id === target.id)) room.speaker = { kind: 'member', id: target.id };
-        else if (target?.kind === 'ai' && room.setup.personas.some(p => p.id === target.id)) room.speaker = { kind: 'ai', id: target.id };
-        else throw new ApiError('找不到这位发言者。');
-        room.turnStartedAt = target?.kind === 'member' ? this.deps.now() : 0;
+        const who = target?.kind === 'member' ? room.members.find(m => m.id === target.id) : undefined;
+        if (who) { room.entries.push({ id: uid(), kind: 'sys', text: `${me.name} 请 ${who.name} 说说看。` }); break; }
+        if (target?.kind !== 'ai' || !room.setup.personas.some(p => p.id === target.id)) throw new ApiError('找不到这位发言者。');
+        room.speaker = { kind: 'ai', id: target.id };
+        room.aiDueAt = undefined; room.pendingSince = undefined;   // 马上点名，就不用再等自动接话
         room.error = '';
         break;
       }
@@ -370,13 +411,21 @@ export class RoomCore {
         room.entries.push({ id: uid(), kind: 'sys', text: seat ? `${me.name} 担任${this.seatName(seat)}。` : `${me.name} 离开席位，改为旁听。` });
         break;
       }
+      case 'aiPause': {
+        hostOnly(); live();
+        if (room.setup.mode !== 'roundtable') throw new ApiError('只有圆桌可以暂停 AI 嘉宾。');
+        room.aiPaused = !!msg.paused;
+        room.entries.push({ id: uid(), kind: 'sys', text: room.aiPaused ? 'AI 嘉宾先不接话，房主点名时再说。' : 'AI 嘉宾恢复接话。' });
+        if (room.aiPaused) { room.aiDueAt = undefined; room.pendingSince = undefined; await this.deps.setAlarm(this.nextAlarm(room)); }
+        break;
+      }
       case 'retry': { hostOnly(); live(); idle(); room.error = ''; break; }
       case 'finish': { hostOnly(); idle(); if (room.status === 'finished') return; this.finish(room); break; }
       default: throw new ApiError('不支持的操作。');
     }
     await this.save();
     this.broadcast();
-    if (!['finish', 'propose', 'decidePoint'].includes(msg.type)) await this.runAI(room);
+    if (!['finish', 'propose', 'decidePoint', 'aiPause'].includes(msg.type)) await this.runAI(room);
   }
 
   private advanceDebate(room: StoredRoom) {
@@ -386,7 +435,7 @@ export class RoomCore {
     if (room.cursor >= room.setup.turns.length) this.finish(room);
   }
   private finish(room: StoredRoom) {
-    room.status = 'finished'; room.speaker = null; room.takeover = false;
+    room.status = 'finished'; room.speaker = null; room.takeover = false; room.aiDueAt = undefined; room.pendingSince = undefined;
     room.entries.push({ id: uid(), kind: 'sys', text: '讨论结束。每个人可以查看自己的复盘。' });
     room.expiresAt = Math.min(room.expiresAt, this.deps.now() + ROOM_LIMITS.afterFinishMs);
     void this.deps.setAlarm(room.expiresAt);
@@ -420,7 +469,7 @@ export class RoomCore {
         try {
           const res = debate
             ? await this.deps.generate('debate', { session: snapshotFor(room, null) }, relay.push)
-            : await this.deps.generate('discuss', { session: snapshotFor(room, null), roleId: persona!.id, task: room.lastMember ? undefined : '主持人请你接着前面的发言说。' }, relay.push);
+            : await this.deps.generate('discuss', { session: snapshotFor(room, null), roleId: persona!.id, task: room.lastMember ? '这是一个多人的群聊，几个人可能同时在说话：挑最值得接的一句回应，可以点名回应某个人。' : '主持人请你接着前面的发言说。' }, relay.push);
           relay.stop();
           // 等待期间房主可能结束了讨论
           if (room.status !== 'live' || room.cursor !== cursor || JSON.stringify(room.speaker) !== speaker) break;
@@ -432,8 +481,7 @@ export class RoomCore {
             this.advanceDebate(room);
           } else {
             room.entries.push({ id, kind: 'msg', who: persona!.id, name: persona!.name, text, source: 'api', model: res.model, terms: cleanTerms(res.terms) });
-            room.speaker = { kind: 'member', id: this.nextMember(room, room.lastMember) };
-            room.turnStartedAt = this.deps.now();
+            room.speaker = null;   // 回到群聊；说话期间有人插嘴的话，scheduleReply 已经排好了下一次接话
           }
         } catch (e) {
           relay.stop();
@@ -473,17 +521,6 @@ export class RoomCore {
     const p = list[room.nextPersona % list.length];
     room.nextPersona = (room.nextPersona + 1) % list.length;
     return p.id;
-  }
-  // 圆桌里下一位真人：按加入顺序轮流，跳过不在线的人；都不在线时交给房主
-  private nextMember(room: StoredRoom, after: string | null) {
-    const online = new Set(this.deps.sockets().map(s => s.memberId()));
-    const list = room.members;
-    const start = after ? list.findIndex(m => m.id === after) : -1;
-    for (let k = 1; k <= list.length; k++) {
-      const m = list[(start + k + list.length) % list.length];
-      if (online.has(m.id)) return m.id;
-    }
-    return list.find(m => m.host)!.id;
   }
   private freeSeat() {
     const taken = new Set(this.room!.members.map(m => m.seat));
@@ -656,7 +693,7 @@ export class RoomCore {
     return {
       id: room.id, status: room.status, setup: room.setup, members, entries: room.entries, covered: room.covered,
       cursor: room.cursor, speaker: room.speaker, aiBusy: room.aiBusy, error: room.error, aiCalls: room.aiCalls, expiresAt: room.expiresAt,
-      now, turnStartedAt: room.turnStartedAt, voiceAvailable: !!this.deps.synthesize, listenAvailable: !!this.deps.listen, proposals: room.proposals ?? []
+      now, turnStartedAt: room.setup.mode === 'roundtable' ? 0 : room.turnStartedAt, aiPaused: !!room.aiPaused, voiceAvailable: !!this.deps.synthesize, listenAvailable: !!this.deps.listen, proposals: room.proposals ?? []
     };
   }
   private broadcast() {
