@@ -98,7 +98,7 @@ export function paceOf(s: SessionSnapshot) {
 }
 function paceRule(s: SessionSnapshot): string {
   const p = paceOf(s);
-  return (p.afterGuest ? '上一句是另一位嘉宾说的：这一轮接他的话说，回应、补充或反驳他，不要向学习者提问。' : '')
+  return (p.afterGuest ? '上一句是另一位嘉宾说的：这一轮接他的话说，回应、补充或反驳他，像聊天一样随口接，不要引用他的原话；不要向学习者提问。' : '')
     + (!p.afterGuest && p.questionsInARow >= 2 ? '前面已经连着问了好几个问题：这一轮不要提问，说说你的看法、举个例子或讲点知识。' : '')
     + (p.shortReply ? '学习者刚才回答得很短：可能是前面说得太绕，先用大白话或一个具体的例子说一句，不要接着追问更抽象的问题，也不要和别的嘉宾越聊越深。' : '');
 }
