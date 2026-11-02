@@ -28,6 +28,13 @@ export const ROOM_LIMITS = {
 
 export interface RoomSeat extends Seat { name: string }
 
+// 圆桌是群聊：谁都可以随时说。AI 嘉宾等大家停一停再接话，免得抢话
+export const ROOM_CHAT = {
+  gapMs: 1500,          // 每人两条发言之间至少隔这么久
+  replyAfterMs: 4000,   // 最后一句之后这么久没人再说，AI 嘉宾接话
+  maxWaitMs: 12000      // 一直有人在说，最多等这么久也接一次
+} as const;
+
 // 快捷短语：只是提醒，不进讨论记录，也不发给 AI
 export const QUICK_MESSAGES = ['等一等', '我在想', '请继续', '快点啊'] as const;
 
@@ -71,6 +78,7 @@ export interface RoomView {
   turnStartedAt?: number;    // 当前这次发言开始的时间（后端时钟），0 表示不计时（例如轮到 AI）
   voiceAvailable?: boolean;
   listenAvailable?: boolean; // 房主的后端配了讯飞语音听写
+  aiPaused?: boolean;        // 圆桌：房主暂停了 AI 嘉宾自动接话
   proposals?: PointProposal[];
 }
 
@@ -92,6 +100,7 @@ export type ClientMessage =
   | { type: 'speak'; entryId: string; voice: string }   // 朗读一条发言，音频只发给请求的人
   | { type: 'propose'; text: string; source: 'human' | 'ai' }  // 提议新的讨论要点
   | { type: 'decidePoint'; id: string; accept: boolean }       // 房主采纳或忽略提案
+  | { type: 'aiPause'; paused: boolean }               // 房主暂停或恢复 AI 嘉宾自动接话（圆桌）
   | { type: 'listen'; op: 'start' | 'audio' | 'end' | 'cancel'; audio?: string }  // 语音输入：录音一帧帧送给房间，识别结果只回给自己
   | { type: 'ask'; reqId: string; purpose: 'hint'; task?: string }
   | { type: 'ask'; reqId: string; purpose: 'explain'; entryId: string; kind: ExplainKind }
