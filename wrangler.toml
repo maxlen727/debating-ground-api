@@ -20,7 +20,9 @@ new_sqlite_classes = ["Room"]
 
 [vars]
 # 允许调用这个后端的网站，逗号分隔。自己部署时改成你的界面地址。
-ALLOWED_ORIGINS = "https://maxlen727.github.io"
+# https://localhost 是安卓 App 的页面来源（App 里的页面由 App 自己提供）。不用 App 可以删掉它。
+# 注意：别的用 Capacitor 打包的 App 也是这个来源，但它们仍然要有访问口令（或房间邀请码）才能用这个后端。
+ALLOWED_ORIGINS = "https://maxlen727.github.io,https://localhost"
 
 # 以下四项必须用加密变量设置，不要写进这个文件（用按钮部署时，部署页会提示填写）：
 #   npx wrangler secret put API_KEY          AI 服务商的 API Key
