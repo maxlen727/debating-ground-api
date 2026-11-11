@@ -35,7 +35,7 @@ const RULES: Record<ModeId, { name: string; topic: string; roles: string; turn: 
     name: '苏格拉底追问',
     topic: 'topic 是一个引导性的核心问题，以问号结尾；最好落在一个具体的场景里，初学者一看就能说上话。',
     roles: 'roles 给 1 个：追问者，title 写“追问者”，persona 写他是个什么样的人、平时怎么说话（具体一点，像在描述一个真人）。',
-    turn: '你是追问者，擅长用少而准的好问题帮学习者自己想明白。多用具体场景和例子让他发现说法里含糊的地方；他卡住时先给一个线索或例子，而不是再问一个更难的问题；他想明白了，就说清楚他对在哪里，再往下一层走。他自己正在想、快想到的时候，留一步给他；他直接问你的时候，就痛快地告诉他。'
+    turn: '你是追问者，擅长用少而准的好问题帮学习者自己想明白。多用具体场景和例子让他发现说法里含糊的地方；他卡住时先给一个线索或例子，而不是再问一个更难的问题；他想明白了，就说清楚他对在哪里，再往下一层走。不要一口气把完整答案讲完。'
   },
   roundtable: {
     name: '圆桌讨论',
@@ -85,14 +85,12 @@ const VOICE_RULE = '说话要像一个真人在聊天，不像在写文章：'
 // （真实讨论里发现：每轮都以提问结尾、逐句给学习者的话贴“事实/观点”标签，学习者会觉得在被拷问。）
 const PARTNER_RULE = '你和学习者是一起把这个概念想明白的伙伴，不是考官。这一轮只做一件事，从下面挑最合适的：回应他刚说的、说说你自己的看法、讲一个具体例子或真实案例、介绍一点相关的知识、提出不同意见，或者问一个问题。'
   + '先给再问：如果要提问，先拿出你自己的东西（看法、例子或知识）；一轮最多问一个问题，而且不必每轮都问，陈述也可以是一轮很好的结尾。'
-  + '学习者直接问你一个问题（“X 是什么”“为什么”“有什么区别”），就先完整、准确地回答它，可以带一个例子，再顺着答案往下聊；不要反问回去让他自己猜，也不要只给一半。'
   + '学习者说对了，就痛快地承认，然后往前走。学习者回答很短或者卡住了，就换个说法、举个更具体的例子，或者先说说你自己怎么想，不要把问题变得更抽象。顺着学习者感兴趣的方向聊，他关心的问题值得展开。'
   + '学习者说错了事实或用错了概念，用一句话自然地给出正确的说法，再接着讨论；不要逐句给他的话贴“这是事实”“这是观点”的标签。学习者表达的是价值判断或立场时，认真对待它：讲讲支持和反对的理由，可以表达你的不同意见，但不要把立场当成错误来纠正。还没有定论的问题（比如 AI 有没有意识或意志），当作开放问题来讨论，讲清楚各方的理由，不要把其中一方说成事实。'
   + '不要用套话，比如“温和纠正一下”“这是判断，不是事实”“我想追问”“你怎么看”。要点是讨论的方向，不是要逐个完成的清单，不要硬把话题拉回要点。';
 
 // 根据讨论进行到哪里，给这一轮加几句具体提醒（比只靠通用规则更可靠）
 const ASKS = /[？?]\s*$|你怎么看|你觉得呢|你说呢/;
-const DIRECT = /(是什么|什么是|什么意思|为什么|为啥|怎么回事|怎么(算|理解|区分)|有什么(区别|不同|用)|区别是|到底是)/;
 export function paceOf(s: SessionSnapshot) {
   const guests = new Set(s.roles.map(r => r.name));
   const msgs = s.messages.filter(m => isObj(m) && m.kind === 'msg' && typeof m.text === 'string');
@@ -103,30 +101,17 @@ export function paceOf(s: SessionSnapshot) {
   }
   const last = msgs.at(-1);
   const learnerLast = [...msgs].reverse().find(m => !guests.has(m.name));
-  const fromLearner = !!learnerLast && last === learnerLast;
-  // 学习者想知道答案：“X 是什么”“为什么”“有什么区别”这类直接提问（不含“能换个说法吗”这种请求）
-  const directQuestion = fromLearner && DIRECT.test(learnerLast.text.trim()) && !/能不能|能换|可以换|再说一遍/.test(learnerLast.text);
-  // 学习者上一次是不是也回答得很短：连着都很短时不再要求 AI 也说短（否则每段都一样短，反而不像真人）
-  const learnerSaid = msgs.filter(m => !guests.has(m.name));
-  const isShort = (t: string) => Array.from(t.trim()).length < 16;
-  const shortAgain = learnerSaid.length >= 2 && isShort(learnerSaid.at(-2)!.text);
   return {
     questionsInARow,
     afterGuest: !!last && guests.has(last.name),
-    directQuestion,
-    shortReply: fromLearner && !directQuestion && isShort(learnerLast.text),
-    shortAgain
+    shortReply: !!learnerLast && last === learnerLast && Array.from(learnerLast.text.trim()).length < 16
   };
 }
 function paceRule(s: SessionSnapshot): string {
   const p = paceOf(s);
   return (p.afterGuest ? '上一句是另一位嘉宾说的：这一轮接他的话说，回应、补充或反驳他，像聊天一样随口接，不要引用他的原话；不要向学习者提问。' : '')
-    + (!p.afterGuest && p.questionsInARow >= 2 ? (s.teaching
-      // 当学生时连着问：用陈述句说说自己现在怎么理解（理解错了也没关系），让老师来判断
-      ? '你已经连着问了好几次：这一轮不要以问题结尾，用陈述句说说你现在是怎么理解的，哪怕理解得不对，让老师来判断。'
-      : '前面已经连着问了好几个问题：这一轮不要以问题结尾，说说你的看法、举个例子或讲点知识。') : '')
-    + (p.directQuestion && !s.teaching ? '学习者刚才直接问了一个问题：这一轮先把它答清楚，再顺着往下聊；不要用一个问题去回答他的问题。' : '')
-    + (p.shortReply ? '学习者刚才回答得很短：可能是前面说得太绕，先用大白话或一个具体的例子说一句，直接说那个例子，不要用“打个比方”“换个说法”这样的话开头；不要接着追问更抽象的问题，也不要和别的嘉宾越聊越深。' : '');
+    + (!p.afterGuest && p.questionsInARow >= 2 ? '前面已经连着问了好几个问题：这一轮不要提问，说说你的看法、举个例子或讲点知识。' : '')
+    + (p.shortReply ? '学习者刚才回答得很短：可能是前面说得太绕，先用大白话或一个具体的例子说一句，不要接着追问更抽象的问题，也不要和别的嘉宾越聊越深。' : '');
 }
 
 /* ---------- 输入校验 ---------- */
