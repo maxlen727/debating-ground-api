@@ -106,11 +106,16 @@ export function paceOf(s: SessionSnapshot) {
   const fromLearner = !!learnerLast && last === learnerLast;
   // 学习者想知道答案：“X 是什么”“为什么”“有什么区别”这类直接提问（不含“能换个说法吗”这种请求）
   const directQuestion = fromLearner && DIRECT.test(learnerLast.text.trim()) && !/能不能|能换|可以换|再说一遍/.test(learnerLast.text);
+  // 学习者上一次是不是也回答得很短：连着都很短时不再要求 AI 也说短（否则每段都一样短，反而不像真人）
+  const learnerSaid = msgs.filter(m => !guests.has(m.name));
+  const isShort = (t: string) => Array.from(t.trim()).length < 16;
+  const shortAgain = learnerSaid.length >= 2 && isShort(learnerSaid.at(-2)!.text);
   return {
     questionsInARow,
     afterGuest: !!last && guests.has(last.name),
     directQuestion,
-    shortReply: fromLearner && !directQuestion && Array.from(learnerLast.text.trim()).length < 16
+    shortReply: fromLearner && !directQuestion && isShort(learnerLast.text),
+    shortAgain
   };
 }
 function paceRule(s: SessionSnapshot): string {
@@ -121,7 +126,7 @@ function paceRule(s: SessionSnapshot): string {
       ? '你已经连着问了好几次：这一轮不要以问题结尾，用陈述句说说你现在是怎么理解的，哪怕理解得不对，让老师来判断。'
       : '前面已经连着问了好几个问题：这一轮不要以问题结尾，说说你的看法、举个例子或讲点知识。') : '')
     + (p.directQuestion && !s.teaching ? '学习者刚才直接问了一个问题：这一轮先把它答清楚，再顺着往下聊；不要用一个问题去回答他的问题。' : '')
-    + (p.shortReply ? '学习者刚才回答得很短：可能是前面说得太绕，先用大白话或一个具体的例子说一句；这一轮也说短一点，两三句就够，不要接着追问更抽象的问题，也不要和别的嘉宾越聊越深。' : '');
+    + (p.shortReply ? '学习者刚才回答得很短：可能是前面说得太绕，先用大白话或一个具体的例子说一句；' + (p.shortAgain ? '' : '这一轮也说短一点，两三句就够；') + '不要接着追问更抽象的问题，也不要和别的嘉宾越聊越深。' : '');
 }
 
 /* ---------- 输入校验 ---------- */
