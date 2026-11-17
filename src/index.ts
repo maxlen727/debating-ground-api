@@ -4,6 +4,7 @@
 // 多人讨论：/api/rooms 创建房间（需要访问口令），/api/rooms/<id>/ws 用邀请码加入（不需要口令）。
 import { ApiError, normalizeConfig, buildRequest, finalize, complete, streamGenerate, STREAMABLE } from './vendor/server/ai.ts';
 import type { Purpose } from './vendor/shared/types.ts';
+import { PURPOSES } from './vendor/shared/purposes.ts';
 import { ROOM_ID } from './vendor/shared/room.ts';
 import { randomToken, roomClass, type Generate } from './room.ts';
 import { synthesizeXfyun, ttsConfigured } from './vendor/server/tts.ts';
@@ -25,8 +26,45 @@ export interface Env {
 // 只用到 Durable Object 命名空间的这两个方法
 export interface RoomNamespace { idFromName(name: string): unknown; get(id: unknown): { fetch(req: Request): Promise<Response> } }
 
-const PURPOSES: Purpose[] = ['prepare', 'discuss', 'debate', 'hint', 'explain', 'reflect', 'review', 'term', 'point'];
 const MAX_BODY = 1_000_000;
+
+// 读取 JSON 请求体，按字节数限制大小（中文一个字占 3 个字节，按字符数算会放进来三倍大的内容）；超了就停止读取
+async function readBody(req: Request, max: number, tooLarge = '请求内容过大。'): Promise<Record<string, unknown>> {
+  if (Number(req.headers.get('Content-Length')) > max) throw new ApiError(tooLarge, 413);
+  const reader = req.body?.getReader();
+  const chunks: Uint8Array[] = []; let size = 0;
+  while (reader) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > max) { await reader.cancel().catch(() => {}); throw new ApiError(tooLarge, 413); }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size); let at = 0;
+  for (const c of chunks) { bytes.set(c, at); at += c.length; }
+  let data: unknown;
+  try { data = JSON.parse(new TextDecoder().decode(bytes) || '{}'); } catch { throw new ApiError('请求格式错误。'); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new ApiError('请求格式错误。');
+  return data as Record<string, unknown>;
+}
+
+// 口令连续输错太多次，就让这个来源等一会儿再试，防止靠不停地猜撞出口令。
+// 计数只在这个 Worker 实例的内存里：实例会被回收，不同机房各算各的，所以这是减速带，不是保险箱；口令本身仍要够长。
+const GUESS_LIMIT = 10, GUESS_WINDOW = 10 * 60_000;
+function guessGuard() {
+  const failures = new Map<string, { count: number; until: number }>();
+  const who = (req: Request) => req.headers.get('CF-Connecting-IP') ?? 'unknown';
+  return {
+    blocked(req: Request) { const f = failures.get(who(req)); return !!f && f.until > Date.now() && f.count >= GUESS_LIMIT; },
+    failed(req: Request) {
+      const now = Date.now();
+      if (failures.size > 5000) for (const [k, f] of failures) if (f.until <= now) failures.delete(k);
+      const f = failures.get(who(req));
+      if (f && f.until > now) f.count++; else failures.set(who(req), { count: 1, until: now + GUESS_WINDOW });
+    }
+  };
+}
+const TOO_MANY_GUESSES = '访问口令输错的次数太多了，请 10 分钟后再试。';
 
 // 先各自做 SHA-256 再逐字节比较，耗时与口令内容无关，避免按时间猜口令
 async function sameSecret(a: string, b: string): Promise<boolean> {
@@ -60,6 +98,7 @@ declare const WebSocketPair: { new(): { 0: PairSocket; 1: PairSocket } };
 const NO_ROOMS = '这个后端还不支持多人讨论。请把后端更新到最新代码并重新部署。';
 
 export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(input, init), timeoutMs = 90000) {
+  const guesses = guessGuard();
   return {
     async fetch(req: Request, env: Env): Promise<Response> {
       const url = new URL(req.url);
@@ -96,7 +135,12 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
         const pair = new WebSocketPair();
         const client = pair[0], server = pair[1];
         server.accept();
-        const authorize = async (given: unknown) => !!env.ACCESS_PASSWORD && typeof given === 'string' && !!given && await sameSecret(given, env.ACCESS_PASSWORD);
+        const authorize = async (given: unknown) => {
+          if (!env.ACCESS_PASSWORD || typeof given !== 'string' || !given || guesses.blocked(req)) return false;
+          if (await sameSecret(given, env.ACCESS_PASSWORD)) return true;
+          guesses.failed(req);
+          return false;
+        };
         const relay = listenRelay(env, e => { try { server.send(JSON.stringify(e)); } catch { /* 已断开 */ } }, () => { try { server.close(1000, 'done'); } catch { /* 已关闭 */ } }, authorize);
         server.addEventListener('message', e => { void relay.handle((e as MessageEvent).data); });
         server.addEventListener('close', () => relay.close());
@@ -108,36 +152,28 @@ export function createHandler(fetchImpl: typeof fetch = (input, init) => fetch(i
         // 没设口令就拒绝服务：宁可用不了，也不能让任何人用部署者的额度
         if (!env.ACCESS_PASSWORD) throw new ApiError('后端还没有设置访问口令（ACCESS_PASSWORD）。', 503);
         const given = req.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? '';
-        if (!given || !(await sameSecret(given, env.ACCESS_PASSWORD))) throw new ApiError('访问口令不正确。', 401);
+        if (guesses.blocked(req)) throw new ApiError(TOO_MANY_GUESSES, 429);
+        if (!given || !(await sameSecret(given, env.ACCESS_PASSWORD))) { if (given) guesses.failed(req); throw new ApiError('访问口令不正确。', 401); }
 
         const config = configOf(env);
 
         if (req.method === 'GET' && url.pathname === '/api/config') return json(200, { configured: true, verified: false, baseURL: '', model: config.model, rooms: !!env.ROOMS, ttsConfigured: ttsConfigured(env), sttConfigured: sttConfigured(env) });
         if (req.method === 'POST' && url.pathname === '/api/tts') {
-          const raw = await req.text();
-          if (raw.length > 8_000) throw new ApiError('朗读请求内容过大。', 413);
-          let data: { text?: unknown; voice?: unknown };
-          try { data = JSON.parse(raw || '{}'); } catch { throw new ApiError('请求格式错误。'); }
+          const data = await readBody(req, 8_000, '朗读请求内容过大。');
           // 前端按 splitForSpeech 分段请求，每段不长
           if (typeof data.text !== 'string' || Array.from(data.text).length > SPEECH_SEGMENT) throw new ApiError('朗读文本无效或太长。');
           return json(200, await synthesizeXfyun(data.text, data.voice, env));
         }
         if (req.method === 'POST' && url.pathname === '/api/rooms') {
           if (!env.ROOMS) throw new ApiError(NO_ROOMS, 503);
-          const raw = await req.text();
-          if (raw.length > 200_000) throw new ApiError('请求内容过大。', 413);
-          let body: Record<string, unknown>;
-          try { body = JSON.parse(raw || '{}'); } catch { throw new ApiError('请求格式错误。'); }
+          const body = await readBody(req, 200_000);
           const roomId = randomToken();
           const res = await env.ROOMS.get(env.ROOMS.idFromName(roomId)).fetch(new Request('https://room/init', { method: 'POST', body: JSON.stringify({ setup: body.setup, hostName: body.hostName, roomId }) }));
           return json(res.status, await res.json());
         }
         if (req.method !== 'POST' || (url.pathname !== '/api/test' && url.pathname !== '/api/generate')) throw new ApiError('接口不存在。', 404);
 
-        const raw = await req.text();
-        if (raw.length > MAX_BODY) throw new ApiError('请求内容过大。', 413);
-        let data: Record<string, unknown>;
-        try { data = JSON.parse(raw || '{}'); } catch { throw new ApiError('请求格式错误。'); }
+        const data = await readBody(req, MAX_BODY);
         const purpose = url.pathname === '/api/test' ? 'test' : data.purpose as Purpose;
         if (purpose !== 'test' && !PURPOSES.includes(purpose)) throw new ApiError('不支持的 AI 操作。');
 

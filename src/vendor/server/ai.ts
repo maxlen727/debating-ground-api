@@ -370,8 +370,7 @@ export function finalize(request: BuiltRequest, result: { text: string; model: s
 }
 
 /* ---------- 调用 Chat Completions ---------- */
-// 这些用途输出的是给人读的文字，可以边生成边显示；准备、复盘、术语卡片要等完整 JSON 校验后才能用
-export const STREAMABLE: Purpose[] = ['discuss', 'debate', 'hint', 'explain', 'reflect'];
+export { STREAMABLE } from '../shared/purposes.ts';
 
 // 流式显示时能给用户看的部分：标记行（[[要点:…]]、[[术语:…]]）只给系统读，从第一个 [[ 起都不显示；
 // 末尾可能是标记或密钥开头的几个字先扣住，等确定不是再放出来。结果总是前一次结果的延长。
