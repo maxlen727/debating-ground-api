@@ -533,11 +533,13 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
       const system =
         COMMON +
         '你是一个学习应用的复盘老师。根据讨论记录判断学习者对概念的理解。只依据学习者本人的发言和小结判断（资料中 speaker 带“学习者”字样的是学习者）；其他角色说出的内容不代表学习者懂了。只输出一个 JSON 对象，不要任何说明或代码块标记。格式：' +
-        '{"oneLine":"一句话总体评价，不超过 50 字","points":[{"label":"要点原文","status":"mastered|partial|missing","note":"不超过 30 字的依据"}],"misconceptions":[{"said":"学习者的误解，转述","fix":"正确的理解，不超过 40 字"}],"stances":[{"said":"学习者的立场，转述","note":"点评他的理由，不超过 50 字"}],"quiz":[{"q":"题干","options":["A","B","C","D"],"answer":0,"why":"不超过 40 字的解析"}]}。' +
+        '{"oneLine":"对这次讨论的一句话总体评价，不超过 50 字","summary":"用学习者自己的话说清这个概念是什么，不超过 60 字","useWhen":"遇到什么情境、什么问题时该想到这个概念，不超过 40 字","points":[{"label":"要点原文","status":"mastered|partial|missing","note":"不超过 30 字的判断理由","evidence":"支持这个判断的学习者原话，摘一句，不超过 60 字"}],"examples":["学习者自己举过的例子，转述，不超过 50 字"],"misconceptions":[{"said":"学习者的误解，转述","fix":"正确的理解，不超过 40 字"}],"boundaries":["它不是什么、和哪个相近概念的区别，不超过 50 字"],"related":["相关的概念名，不超过 12 字"],"stances":[{"said":"学习者的立场，转述","note":"点评他的理由，不超过 50 字"}],"checks":[{"q":"问题","answer":"参考要点，不超过 80 字","point":"它检验的要点原文"}]}。' +
+        // 复盘的产物会合并进这个概念的笔记，以后拿出来复用、自检（#140）：每一项都要能追到讨论里
+        'summary 和 examples 只来自学习者自己说过的话：他没说清楚就写他目前的理解，不要替他补全；没举过例子就给空数组。evidence 从学习者的发言或小结里原样摘一句，找不到就留空字符串，不要编。boundaries 只写讨论中真的涉及到的区别；related 只写讨论中提到过的相关概念；没有就给空数组。' +
         scope +
         // 立场不是误解：评理由，不评对错（真实讨论里“LLM 应该有权利”被当成误解列出来过）
         'misconceptions 只放事实上说错的、概念用错的、该区分却混在一起的地方；没有就给空数组。价值判断、立场，以及对还没有定论的问题的判断（比如 AI 有没有意识、意志、情感，该不该有权利），都不是误解，不放进 misconceptions，放进 stances：note 只点评理由，比如理由是否说清楚了、推理有没有跳步、有没有考虑反方最有力的理由、和他别的说法是否一致，不评判立场本身对不对；没有表达立场就给空数组。“应该……”“我觉得……更好”这类主张都是立场；拿不准一句话算误解还是立场时，算立场。同一句话只放进一个地方。' +
-        'quiz 出 3 道针对薄弱点的四选一单选题，只考事实和概念，不考立场，answer 是正确选项的下标（0 到 3）。';
+        'checks 出 3 道自检题，不给选项：要学习者用自己的话解释、举例、判断一个具体情境或区分相近概念，能看出是不是真懂，不考背诵；优先检验 partial 和 missing 的要点，point 写它检验的那条要点原文；只考事实和概念，不考立场。';
       return {
         messages: pair(
           system,
@@ -696,45 +698,52 @@ export function finalize(request: BuiltRequest, result: { text: string; model: s
     return { data: out, model: result.model };
   }
   const statuses: PointStatus[] = ['mastered', 'partial', 'missing'];
+  const texts = (v: unknown, n: number, len: number) =>
+    arr(v)
+      .map(x => short(x, len))
+      .filter(Boolean)
+      .slice(0, n);
+  const points = arr(data.points)
+    .filter(isObj)
+    .slice(0, 8)
+    .map(pt => ({
+      label: short(pt.label, 60),
+      status: statuses.includes(pt.status as PointStatus) ? (pt.status as PointStatus) : 'partial',
+      note: short(pt.note, 120),
+      evidence: short(pt.evidence, 160),
+    }));
+  const labels = points.map(p => p.label);
   const review: Review = {
     oneLine: short(data.oneLine, 120),
-    points: arr(data.points)
-      .filter(isObj)
-      .slice(0, 8)
-      .map(pt => ({
-        label: short(pt.label, 60),
-        status: statuses.includes(pt.status as PointStatus)
-          ? (pt.status as PointStatus)
-          : 'partial',
-        note: short(pt.note, 120),
-      })),
+    summary: short(data.summary, 160),
+    useWhen: short(data.useWhen, 120),
+    points,
+    examples: texts(data.examples, 4, 150),
     misconceptions: arr(data.misconceptions)
       .filter(isObj)
       .slice(0, 5)
       .map(m => ({ said: short(m.said, 200), fix: short(m.fix, 200) }))
       .filter(m => m.said),
+    boundaries: texts(data.boundaries, 4, 150),
+    related: texts(data.related, 6, 24),
     stances: arr(data.stances)
       .filter(isObj)
       .slice(0, 4)
       .map(m => ({ said: short(m.said, 200), note: short(m.note, 200) }))
       .filter(m => m.said),
-    quiz: arr(data.quiz)
+    // 自检题检验的要点要在这次的要点里，对不上就不挂（笔记里按名字找要点）
+    checks: arr(data.checks)
       .filter(isObj)
-      .filter(q => Array.isArray(q.options) && q.options.length >= 2)
-      .slice(0, 5)
-      .map(q => {
-        const options = arr(q.options)
-          .slice(0, 4)
-          .map(o => short(o, 120));
-        const answer =
-          Number.isInteger(q.answer) &&
-          (q.answer as number) >= 0 &&
-          (q.answer as number) < options.length
-            ? (q.answer as number)
-            : 0;
-        return { q: short(q.q, 300), options, answer, why: short(q.why, 200) };
+      .slice(0, 4)
+      .map(c => {
+        const point = short(c.point, 60);
+        return {
+          q: short(c.q, 300),
+          answer: short(c.answer, 240),
+          ...(labels.includes(point) ? { point } : {}),
+        };
       })
-      .filter(q => q.q),
+      .filter(c => c.q && c.answer),
   };
   // 立场不能同时被当成误解：模型偶尔把同一句话两边都放（真实评测里出现过），以立场为准
   if (review.stances?.length)

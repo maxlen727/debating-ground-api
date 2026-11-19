@@ -75,18 +75,33 @@ export interface Reflection {
 }
 export type Entry = ChatMessage | SystemLine | Reflection;
 
-export interface QuizItem {
-  q: string;
-  options: string[];
-  answer: number;
-  why: string;
+// 复盘里的一个要点：status 是这次讨论里看到的掌握程度，note 是判断的理由，
+// evidence 是学习者自己说过的原话（“掌握”要能追到依据，见 #140）
+export interface ReviewPoint {
+  label: string;
+  status: PointStatus;
+  note: string;
+  evidence?: string;
 }
+// 自检题：不给选项，先自己答，再对照参考要点；point 是它检验的那个要点
+export interface SelfCheck {
+  q: string;
+  answer: string;
+  point?: string;
+}
+// 一次讨论的复盘。oneLine 评价这次讨论；其余是能沉淀进概念笔记的内容（#140）。
+// 旧存档里的复盘没有后面这些字段（有的还带着四选一的 quiz），读的时候都当可选
 export interface Review {
   oneLine: string;
-  points: { label: string; status: PointStatus; note: string }[];
+  summary?: string; // 用学习者自己的话说清这个概念是什么
+  useWhen?: string; // 什么时候该想到它（像 skill 的 description）
+  points: ReviewPoint[];
+  examples?: string[]; // 学习者自己举过的例子
   misconceptions: { said: string; fix: string }[];
-  stances?: { said: string; note: string }[]; // 学习者的立场：只点评理由，不判对错（旧卡片没有这一项）
-  quiz: QuizItem[];
+  boundaries?: string[]; // 它不是什么、和哪些相近概念容易混
+  related?: string[]; // 相关的概念
+  stances?: { said: string; note: string }[]; // 学习者的立场：只点评理由，不判对错
+  checks?: SelfCheck[];
 }
 
 export interface Previous {
