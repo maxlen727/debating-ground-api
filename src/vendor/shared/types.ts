@@ -123,7 +123,44 @@ export interface SessionSnapshot {
   finished?: boolean;
   context?: string; // 学习者交代的背景（具体事件类的话题）
   branch?: { topic: string; from: string; path: string[] }; // 知识画布：正在聊的分支、从哪句话展开、上层分支的话题
+  material?: MaterialExcerpt; // 从材料开始的讨论：这个技术点在材料里的原文节选（#144）
 }
+
+/* ---------- 读材料（#144） ---------- */
+// 材料按节切开（标题 + 正文），节号从 1 开始
+export interface MaterialSection {
+  n: number;
+  heading: string;
+  text: string;
+}
+// 研读助手整理出的技术点地图
+export interface MapPoint {
+  name: string; // 技术点或概念名
+  why: string; // 它在材料里起什么作用
+  sections: number[]; // 在哪几节
+  needs: string[]; // 理解它要先懂的概念
+}
+export interface MaterialMap {
+  title: string;
+  summary: string;
+  points: MapPoint[];
+}
+// 讨论时带上的原文节选：只有这个点所在的几节，有长度上限
+export interface MaterialExcerpt {
+  title: string;
+  point: string;
+  excerpt: string;
+}
+// 研读助手的一步：看过什么、做了什么（mini-swe-agent 式的线性记录）
+export interface ReadStep {
+  thought: string;
+  action: string; // “读第 2、3 节”“搜「注意力」”这样的人话描述
+  observation: string; // 工具返回的原文（发给模型时会截短）
+}
+export type ReadAction =
+  | { thought: string; action: 'read'; sections: number[] }
+  | { thought: string; action: 'search'; query: string }
+  | { thought: string; action: 'finish'; map: MaterialMap };
 
 // needsContext：输入是一件具体的事、模型不了解经过时，先请学习者交代背景（这时其他字段为空）
 // debaters：辩论时正反双方每个席位的认知背景（按论题生成，最多各 4 个）
@@ -138,7 +175,16 @@ export interface PrepareResult {
 }
 
 export type Purpose =
-  'prepare' | 'discuss' | 'debate' | 'hint' | 'explain' | 'reflect' | 'review' | 'term' | 'point';
+  | 'prepare'
+  | 'discuss'
+  | 'debate'
+  | 'hint'
+  | 'explain'
+  | 'reflect'
+  | 'review'
+  | 'term'
+  | 'point'
+  | 'read';
 
 // 术语小卡片：讨论中遇到的陌生词
 export interface TermCard {
@@ -174,6 +220,7 @@ export interface PayloadMap {
     previous?: Previous | null;
     context?: string;
     topic?: string;
+    material?: MaterialExcerpt; // 从材料里的一个技术点开始（#144）
   }; // topic：讨论题已定，只按它重新设定角色
   discuss: { session: SessionSnapshot; roleId: string; task?: string };
   debate: { session: SessionSnapshot };
@@ -183,6 +230,13 @@ export interface PayloadMap {
   review: { session: SessionSnapshot };
   term: { session: SessionSnapshot; term: string; quote?: string };
   point: { session: SessionSnapshot };
+  // 研读助手的一步：大纲（每节的标题和字数）、之前每一步的记录；last 时必须结束
+  read: {
+    title: string;
+    outline: { n: number; heading: string; chars: number }[];
+    steps: ReadStep[];
+    last?: boolean;
+  };
 }
 export interface ResultMap {
   prepare: DataResult<PrepareResult>;
@@ -194,4 +248,5 @@ export interface ResultMap {
   review: DataResult<Review>;
   term: DataResult<TermCard>;
   point: DataResult<PointSuggestion>;
+  read: DataResult<ReadAction>;
 }
