@@ -14,6 +14,8 @@ import {
 import type { Purpose } from './vendor/shared/types.ts';
 import { PURPOSES } from './vendor/shared/purposes.ts';
 import { ROOM_ID } from './vendor/shared/room.ts';
+import { importLink } from './vendor/shared/pages.ts';
+import { workerGet } from './fetchpage.ts';
 import { randomToken, roomClass, type Generate } from './room.ts';
 import { synthesizeXfyun, ttsConfigured } from './vendor/server/tts.ts';
 import { SPEECH_SEGMENT } from './vendor/shared/speech.ts';
@@ -157,6 +159,7 @@ export function createHandler(
   timeoutMs = 90000,
 ) {
   const guesses = guessGuard();
+  const getPage = workerGet(fetchImpl);
   return {
     async fetch(req: Request, env: Env): Promise<Response> {
       const url = new URL(req.url);
@@ -255,6 +258,13 @@ export function createHandler(
           throw new ApiError('访问口令不正确。', 401);
         }
 
+        // 读材料：取一个链接的正文（#157）。只读、地址经过检查，见 src/fetchpage.ts；不需要 AI 接口
+        if (req.method === 'POST' && url.pathname === '/api/fetch') {
+          const data = await readBody(req, 4_000);
+          if (typeof data.url !== 'string' || !data.url.trim() || data.url.length > 2000)
+            throw new ApiError('请填写要读取的链接。');
+          return json(200, await importLink(data.url, getPage));
+        }
         const config = configOf(env);
 
         if (req.method === 'GET' && url.pathname === '/api/config')
