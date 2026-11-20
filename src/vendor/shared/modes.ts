@@ -12,19 +12,19 @@ export const MODES: Record<ModeId, ModeInfo> = {
   socratic: {
     name: '苏格拉底追问',
     short: '追问',
-    desc: 'AI 陪你一步步想，用好问题和例子帮你发现哪里没想清；想检验自己，可以换你来讲给它听。',
-    when: '刚接触一个概念，或者想检验能不能讲清楚',
+    desc: 'AI 陪你一步步想，用好问题和例子帮你发现哪里没想清；遇到想深挖的词，从那句话展开一个分支单独聊。',
+    when: '刚接触一个概念，想一步步把它想清楚',
   },
   roundtable: {
     name: '圆桌讨论',
     short: '圆桌',
-    desc: '三位不同学科背景的 AI 各说各的视角，你来主持。',
+    desc: '三位不同学科背景的 AI 各说各的视角，你来主持；想听谁细说，就从他那句话展开一个分支。',
     when: '想从几个角度看同一个概念',
   },
   teach: {
-    name: '反向讲解',
+    name: '讲给 AI 听',
     short: '讲解',
-    desc: '你当老师，AI 扮演困惑的学生，听你讲、复述、提疑问。',
+    desc: '你来讲，AI 扮演刚接触这个概念的学生，听你讲、复述、提疑问。从概念笔记里开始，讲完的复盘会更新这篇笔记。',
     when: '已经有些理解，检验能不能讲清楚',
   },
   debate: {
@@ -41,8 +41,12 @@ export const MODES: Record<ModeId, ModeInfo> = {
   },
 };
 
-// 反向讲解已并进苏格拉底追问（讨论中“换我来讲”）；MODES 里保留它，旧的讨论和知识卡片还要显示名字
-export const MODE_ORDER: ModeId[] = ['socratic', 'roundtable', 'debate', 'canvas'];
+// 学习页能选的讨论方式。“讲给 AI 听”（teach）从概念笔记里开始；知识画布并进了追问和圆桌（#142），
+// MODES 里保留它，旧的画布讨论还要显示名字
+export const MODE_ORDER: ModeId[] = ['socratic', 'roundtable', 'debate'];
+
+/** 能从一句发言展开分支的讨论方式（知识画布，#142）。辩论不带分支。 */
+export const BRANCH_MODES: ModeId[] = ['socratic', 'roundtable', 'canvas'];
 
 export const STAGE_KINDS: Record<StageKind, string> = {
   opening: '立论 · 双方一辩',

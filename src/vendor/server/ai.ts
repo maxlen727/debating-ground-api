@@ -11,6 +11,7 @@ import type {
   PrepareResult,
   TermCard,
 } from '../shared/types.ts';
+import { BRANCH_MODES } from '../shared/modes.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -95,8 +96,9 @@ const RULES: Record<ModeId, { name: string; topic: string; roles: string; turn: 
       'roles 给 3 个：来自三个不同学科的嘉宾，title 写学科身份，persona 写他看这个概念的独特角度，再用半句话写他说话的样子（比如爱讲自己经历、说话直、慢条斯理爱打比方）；三个人的说话方式要明显不同。',
     turn: '你是圆桌嘉宾，带着你这门学科的知识、案例和看法来聊。可以回应学习者，也可以接其他嘉宾的话：赞同就补充，不同意就直说理由。像真实的圆桌一样，嘉宾之间可以有分歧，不必每次都把话题交还给学习者。',
   },
+  // 讲给 AI 听（#142）：从概念笔记里开始，要点清单就是笔记的要点，不经过准备；topic、roles 只给旧的准备请求用
   teach: {
-    name: '反向讲解',
+    name: '讲给 AI 听',
     topic: 'topic 是学习者要完成的讲解任务，例如“向一个高中生讲清楚……”。',
     roles:
       'roles 给 1 个：一个聪明但对此一无所知的高中生，title 写“学生”，给他起一个名字，persona 写他的性格和说话习惯（像一个具体的高中生）。',
@@ -120,11 +122,7 @@ const RULES: Record<ModeId, { name: string; topic: string; roles: string; turn: 
     turn: '你是陪学习者一起把概念想明白的伙伴。这是一张“知识画布”：讨论是树状的，学习者遇到想深挖的词或问题，会从某句话展开一个分支单独聊，聊完带一句自己的小结回来。在主干上，围绕讨论题往前走；碰到值得单独弄懂的相关概念，点到为止就好，学习者想深挖会自己展开。资料里“学习者的小结”是他从分支带回来的，接着它往下聊。',
   },
 };
-// 苏格拉底追问里“换我来讲”（费曼学习法）：同一位伙伴暂时当听讲的学生。反向讲解模式并进来以后用这一条
-const SWAP_RULE =
-  '现在换学习者来讲：他是老师，你暂时扮演一个聪明但对这个概念一无所知的学生，不再是讨论伙伴。' +
-  RULES.teach.turn;
-// 知识画布的分支：只聊这一枝，别急着回主干（回不回去由学习者决定）
+// 分支（知识画布，追问和圆桌里都能展开，#142）：只聊这一枝，别急着回主干（回不回去由学习者决定）
 const BRANCH_RULE =
   '现在是从主干岔出去的一个分支，专门弄懂资料中 branch.topic；branch.from 是展开它的那句话，branch.path 是外层分支的话题。只围绕这个话题聊，把它讲透：它是什么、一个具体例子、它和讨论的概念有什么关系。不要急着把话题拉回主干，也不必顾及要点清单；学习者想回去时会自己回去。';
 
@@ -191,12 +189,12 @@ function paceRule(s: SessionSnapshot): string {
       ? '上一句是另一位嘉宾说的：这一轮接他的话说，回应、补充或反驳他，像聊天一样随口接，不要引用他的原话；不要向学习者提问。'
       : '') +
     (!p.afterGuest && p.questionsInARow >= 2
-      ? s.teaching
+      ? s.mode === 'teach'
         ? // 当学生时连着问：用陈述句说说自己现在怎么理解（理解错了也没关系），让老师来判断
           '你已经连着问了好几次：这一轮不要以问题结尾，用陈述句说说你现在是怎么理解的，哪怕理解得不对，让老师来判断。'
         : '前面已经连着问了好几个问题：这一轮不要以问题结尾，说说你的看法、举个例子或讲点知识。'
       : '') +
-    (p.directQuestion && !s.teaching
+    (p.directQuestion && s.mode !== 'teach'
       ? '学习者刚才直接问了一个问题：这一轮先把它答清楚，再顺着往下聊；不要用一个问题去回答他的问题。'
       : '') +
     (p.shortReply
@@ -229,11 +227,14 @@ function checkSession(v: unknown): SessionSnapshot {
     throw new ApiError('讨论上下文不完整。');
   if (v.context !== undefined && (typeof v.context !== 'string' || v.context.length > 600))
     throw new ApiError('背景太长了，请控制在 600 字以内。');
-  if (v.teaching !== undefined && (v.teaching !== true || v.mode !== 'socratic'))
-    throw new ApiError('讲解状态无效。');
   if (v.branch !== undefined) {
     const b = v.branch;
-    if (v.mode !== 'canvas' || !isObj(b) || !Array.isArray(b.path) || b.path.length > 8)
+    if (
+      !BRANCH_MODES.includes(v.mode as ModeId) ||
+      !isObj(b) ||
+      !Array.isArray(b.path) ||
+      b.path.length > 8
+    )
       throw new ApiError('分支信息无效。');
     text(b.topic, 40, '分支话题');
     if (
@@ -352,14 +353,13 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
         title = String(role.title ?? '').slice(0, 40),
         persona = String(role.persona ?? '').slice(0, 500);
       const task = typeof p.task === 'string' ? p.task.slice(0, 300) : '';
-      const branch = s.mode === 'canvas' ? s.branch : undefined;
+      const branch = BRANCH_MODES.includes(s.mode) ? s.branch : undefined;
       const system =
         COMMON +
         `你在一个用讨论来学习概念的应用里扮演「${name}」（${title}）。${persona ? '你的背景：' + persona + '。背景只影响你的知识范围和表达方式，不要照读。' : ''}` +
         RULES[s.mode].turn +
         (branch ? BRANCH_RULE : '') +
         PARTNER_RULE +
-        (s.teaching ? SWAP_RULE : '') +
         paceRule(s) +
         VOICE_RULE +
         '不超过 150 字。' +
@@ -375,7 +375,6 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
             mode: RULES[s.mode].name,
             you: name,
             branch,
-            learnerIsTeaching: s.teaching || undefined,
             transcript: transcriptOf(s),
             extraRequest: task || undefined,
           }),
@@ -523,12 +522,12 @@ export function buildRequest(purpose: Purpose | 'test', payload: unknown = {}): 
         s.mode === 'debate'
           ? 'points 按资料中的核心争点逐条给出，label 写争点原文：status 评价学习者对这个争点涉及的概念和判断标准理解得怎样（mastered 能讲清并正确运用，partial 涉及了但不完整或有偏差，missing 没有涉及）；不评判辩论输赢，也不因为立场不同而扣分。'
           : 'points 必须按要点清单逐条给出；' +
-            // 知识画布：分支里的发言和主干一样算数
-            (s.mode === 'socratic'
-              ? 'action 写着“讲给伙伴听”的发言，是学习者换过来当老师讲给别人听的，最能看出他是不是真懂。'
+            (s.mode === 'teach'
+              ? '这次是学习者讲给一个刚接触这个概念的人听：他讲的每一句都算数，最能看出他是不是真懂；学生的疑问和复述不算学习者的理解。'
               : '') +
-            (s.mode === 'canvas'
-              ? '这次讨论是树状的：action 写着“分支：…”的发言，是学习者从主干岔出去单独弄懂的话题，和主干上的发言一样算数。'
+            // 分支里的发言和主干一样算数（追问和圆桌都能展开分支，#142）
+            (BRANCH_MODES.includes(s.mode)
+              ? '如果有 action 写着“分支：…”的发言，那是学习者从主干岔出去单独弄懂的话题，和主干上的发言一样算数。'
               : '');
       const system =
         COMMON +
