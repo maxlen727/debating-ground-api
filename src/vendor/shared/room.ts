@@ -144,3 +144,11 @@ export interface CreatedRoom {
 }
 
 export const ROOM_ID = /^[A-Za-z0-9_-]{22}$/;
+
+/** 局域网（私有）IPv4 地址：10/8、172.16/12、192.168/16。局域网房间的邀请链接只接受这些地址上的 http（#148）。 */
+export function isPrivateIPv4(ip: string): boolean {
+  const p = ip.split('.');
+  if (p.length !== 4 || p.some(x => !/^\d{1,3}$/.test(x) || Number(x) > 255)) return false;
+  const [a, b] = p.map(Number);
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
