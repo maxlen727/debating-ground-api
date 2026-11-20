@@ -12,7 +12,6 @@ export const PURPOSES: Purpose[] = [
   'review',
   'term',
   'point',
-  'read',
 ];
 
 // 这些用途输出的是给人读的文字，可以边生成边显示；准备、复盘、术语卡片要等完整 JSON 校验后才能用
