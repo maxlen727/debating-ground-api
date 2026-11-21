@@ -4,40 +4,35 @@ import type { ModeId, StageKind } from './types.ts';
 export interface ModeInfo {
   name: string;
   short: string;
+  /** 学习页卡片上的一句话说明 */
   desc: string;
-  when: string;
 }
 
 export const MODES: Record<ModeId, ModeInfo> = {
   socratic: {
     name: '苏格拉底追问',
     short: '追问',
-    desc: 'AI 陪你一步步想，用好问题和例子帮你发现哪里没想清；遇到想深挖的词，从那句话展开一个分支单独聊。',
-    when: '刚接触一个概念，想一步步把它想清楚',
+    desc: 'AI 一步步追问，陪你把它想清楚。',
   },
   roundtable: {
     name: '圆桌讨论',
     short: '圆桌',
-    desc: '三位不同学科背景的 AI 各说各的视角，你来主持；想听谁细说，就从他那句话展开一个分支。',
-    when: '想从几个角度看同一个概念',
+    desc: '三位不同背景的 AI 各说视角，你来主持。',
   },
   teach: {
     name: '讲给 AI 听',
     short: '讲解',
-    desc: '你来讲，AI 扮演刚接触这个概念的学生，听你讲、复述、提疑问。从概念笔记里开始，讲完的复盘会更新这篇笔记。',
-    when: '已经有些理解，检验能不能讲清楚',
+    desc: '你来讲，AI 当学生听你讲、提疑问。',
   },
   debate: {
     name: '正反辩论',
     short: '辩论',
-    desc: '分正反方按赛制交锋，席位和流程都可以自定。',
-    when: '概念有争议或有多种解释',
+    desc: '分正反方，按赛制交锋。',
   },
   canvas: {
     name: '知识画布',
     short: '画布',
-    desc: '讨论像一棵树：遇到想深挖的词，就从那句话分出一枝单独聊，聊完带回主干。',
-    when: '一个概念牵出很多新概念，想深挖又怕聊跑题',
+    desc: '从一句话分出枝来深挖，聊完带回主干。',
   },
 };
 
